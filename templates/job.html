@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Playbook Execution Log</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <div class="page-shell narrow">
+      <header class="page-header compact">
+        <div>
+          <p class="eyebrow">Live execution</p>
+          <h1>Playbook run</h1>
+        </div>
+        <a href="/" class="btn btn-secondary">Back to wizard</a>
+      </header>
+
+      <main class="card log-card">
+        <div class="job-meta">
+          <div>
+            <span>Job ID</span>
+            <strong>{{ job_id }}</strong>
+          </div>
+          <div>
+            <span>Status</span>
+            <strong id="job-status">{{ state.status|default('pending') }}</strong>
+          </div>
+        </div>
+
+        <div id="job-summary" class="job-summary">
+          {{ state.summary|default('Getting the execution logs…') }}
+        </div>
+
+        <div id="job-preflight" class="preflight-box" {% if not state.preflight_results %}style="display:none;"{% endif %}>
+          <h3>Cloud credential preflight</h3>
+          <ul id="job-preflight-list" class="check-list">
+            {% for check in state.preflight_results|default([]) %}
+              <li class="check {{ 'pass' if check.ok else 'fail' }}">
+                <span class="bullet"></span>
+                <div>
+                  <strong>{{ check.name }}</strong>
+                  <small>{{ check.message }}</small>
+                </div>
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+
+        <section class="resource-box">
+          <div class="resource-box-header">
+            <h3>Provisioned {{ resources.platform_label|default('cloud') }} resources</h3>
+            <div class="resource-actions">
+              <button type="button" class="btn btn-secondary" id="refresh-resources">Refresh resources</button>
+              <button type="button" class="btn btn-danger" id="terminate-resources">Terminate instances and cleanup volumes</button>
+            </div>
+          </div>
+          <p id="resource-summary" class="review-note">{{ resources.message|default('Resource discovery loads provider-specific resources for this job when supported.') }}</p>
+          <div class="resource-grid">
+            <div class="resource-panel">
+              <h4>Instances</h4>
+              <div id="instance-list">
+                {% if resources.instances %}
+                  {% for instance in resources.instances %}
+                    <div class="resource-item">
+                      <div class="resource-item-title">{{ instance.name }}</div>
+                      <div class="resource-item-meta">ID: {{ instance.instance_id }} | State: {{ instance.state }}</div>
+                      <div class="resource-item-meta">Private IP: {{ instance.private_ip or '—' }} | Public IP: {{ instance.public_ip or '—' }}</div>
+                    </div>
+                  {% endfor %}
+                {% else %}
+                  <div class="resource-empty">No instances discovered yet.</div>
+                {% endif %}
+              </div>
+            </div>
+            <div class="resource-panel">
+              <h4>Volumes</h4>
+              <div id="volume-list">
+                {% if resources.volumes %}
+                  {% for volume in resources.volumes %}
+                    <div class="resource-item">
+                      <div class="resource-item-title">{{ volume.volume_id }}</div>
+                      <div class="resource-item-meta">Attached to: {{ volume.attached_instance_name }} | Device: {{ volume.device_name or '—' }}</div>
+                      <div class="resource-item-meta">Type: {{ volume.volume_type or '—' }} | Size: {{ volume.size_gib or '—' }} GiB | State: {{ volume.state or '—' }}</div>
+                    </div>
+                  {% endfor %}
+                {% else %}
+                  <div class="resource-empty">No attached volumes discovered yet.</div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <pre id="job-log" class="job-log">Waiting for the first log line…</pre>
+      </main>
+    </div>
+
+    <script>
+      const jobId = '{{ job_id }}';
+      const logNode = document.getElementById('job-log');
+      const summaryNode = document.getElementById('job-summary');
+      const statusNode = document.getElementById('job-status');
+      const preflightNode = document.getElementById('job-preflight');
+      const preflightListNode = document.getElementById('job-preflight-list');
+      const resourceSummaryNode = document.getElementById('resource-summary');
+      const instanceListNode = document.getElementById('instance-list');
+      const volumeListNode = document.getElementById('volume-list');
+      const refreshResourcesButton = document.getElementById('refresh-resources');
+      const terminateResourcesButton = document.getElementById('terminate-resources');
+      const resourcePlatformLabel = '{{ resources.platform_label|default("cloud") }}';
+
+      function renderInstances(instances) {
+        if (!Array.isArray(instances) || !instances.length) {
+          instanceListNode.innerHTML = '<div class="resource-empty">No instances discovered yet.</div>';
+          return;
+        }
+        instanceListNode.innerHTML = instances.map((instance) => `
+          <div class="resource-item">
+            <div class="resource-item-title">${instance.name}</div>
+            <div class="resource-item-meta">ID: ${instance.instance_id} | State: ${instance.state || 'unknown'}</div>
+            <div class="resource-item-meta">Private IP: ${instance.private_ip || '—'} | Public IP: ${instance.public_ip || '—'}</div>
+          </div>
+        `).join('');
+      }
+
+      function renderVolumes(volumes) {
+        if (!Array.isArray(volumes) || !volumes.length) {
+          volumeListNode.innerHTML = '<div class="resource-empty">No attached volumes discovered yet.</div>';
+          return;
+        }
+        volumeListNode.innerHTML = volumes.map((volume) => `
+          <div class="resource-item">
+            <div class="resource-item-title">${volume.volume_id}</div>
+            <div class="resource-item-meta">Attached to: ${volume.attached_instance_name || '—'} | Device: ${volume.device_name || '—'}</div>
+            <div class="resource-item-meta">Type: ${volume.volume_type || '—'} | Size: ${volume.size_gib || '—'} GiB | State: ${volume.state || '—'}</div>
+          </div>
+        `).join('');
+      }
+
+      async function refreshResources() {
+        try {
+          const response = await fetch(`/api/job/${jobId}/resources`);
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.message || 'resource-error');
+          }
+          resourceSummaryNode.textContent = data.message || `${resourcePlatformLabel} resources loaded.`;
+          renderInstances(data.instances || []);
+          renderVolumes(data.volumes || []);
+        } catch (error) {
+          resourceSummaryNode.textContent = error.message || 'Unable to load job resources.';
+        }
+      }
+
+      async function refreshJob() {
+        try {
+          const response = await fetch(`/api/job/${jobId}/status`);
+          if (!response.ok) {
+            throw new Error('job-not-found');
+          }
+          const data = await response.json();
+          statusNode.textContent = data.status;
+          summaryNode.textContent = data.summary;
+          if (Array.isArray(data.preflight_results) && data.preflight_results.length) {
+            preflightNode.style.display = 'block';
+            preflightListNode.innerHTML = data.preflight_results.map((check) => `
+              <li class="check ${check.ok ? 'pass' : 'fail'}">
+                <span class="bullet"></span>
+                <div>
+                  <strong>${check.name}</strong>
+                  <small>${check.message}</small>
+                </div>
+              </li>
+            `).join('');
+          }
+          if (data.logs && data.logs.trim()) {
+            logNode.textContent = data.logs;
+          }
+          if (data.status === 'success' || data.status === 'failed') {
+            clearInterval(timer);
+            refreshResources();
+          }
+        } catch (error) {
+          summaryNode.textContent = 'The job is not available yet or has already finished.';
+        }
+      }
+
+      refreshResourcesButton.addEventListener('click', refreshResources);
+      terminateResourcesButton.addEventListener('click', async () => {
+        if (!window.confirm(`Terminate the provisioned resources for this job on ${resourcePlatformLabel} and delete any remaining attached volumes that are not auto-deleted?`)) {
+          return;
+        }
+        terminateResourcesButton.disabled = true;
+        try {
+          const response = await fetch(`/api/job/${jobId}/terminate`, { method: 'POST' });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.message || 'Unable to terminate resources.');
+          }
+          resourceSummaryNode.textContent = data.message || 'Termination requested.';
+          await refreshResources();
+        } catch (error) {
+          resourceSummaryNode.textContent = error.message || 'Unable to terminate resources.';
+        } finally {
+          terminateResourcesButton.disabled = false;
+        }
+      });
+
+      const timer = setInterval(refreshJob, 2000);
+      refreshJob();
+      refreshResources();
+    </script>
+  </body>
+</html>

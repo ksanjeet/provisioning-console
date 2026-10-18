@@ -1,0 +1,1156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Provisioning Console</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <div class="page-shell">
+      <script>
+        window.hostPlanCatalog = {{ host_plan_catalog|tojson }};
+        window.instanceProfileCatalog = {{ instance_profile_catalog|tojson }};
+      </script>
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">Provisioning Console</p>
+          <h1>Provisioning console</h1>
+        </div>
+        <div class="status-pill">
+          <span class="status-dot success"></span>
+          Multi-cloud control plane
+        </div>
+      </header>
+
+      <section class="card provider-dashboard">
+        <div class="provider-dashboard-header">
+          <div>
+            <h2>Connectivity and live inventory</h2>
+            <p class="review-note dashboard-note">See which providers are reachable and what is currently running before you launch anything new.</p>
+          </div>
+          <button type="button" class="btn btn-secondary" id="refresh-dashboard">Refresh dashboard</button>
+        </div>
+        <div class="provider-dashboard-summary" id="provider-dashboard-summary">
+          <div class="dashboard-summary-item">
+            <strong>—</strong>
+            <span>Providers connected</span>
+          </div>
+          <div class="dashboard-summary-item">
+            <strong>—</strong>
+            <span>Need attention</span>
+          </div>
+          <div class="dashboard-summary-item">
+            <strong>—</strong>
+            <span>Visible resources</span>
+          </div>
+        </div>
+        <div class="provider-grid" id="provider-grid">
+          <article class="provider-card provider-card-loading">
+            <div class="provider-card-title-row">
+              <h3>Loading dashboard</h3>
+            </div>
+            <p class="resource-item-meta">Checking AWS, GCP, Azure, and local KVM inventory...</p>
+          </article>
+        </div>
+        <div class="inventory-box">
+          <div class="inventory-box-header">
+            <h3>Unified running estate</h3>
+            <span class="resource-item-meta" id="provider-dashboard-generated-at">Not loaded yet</span>
+          </div>
+          <div class="inventory-list" id="provider-inventory-list">
+            <div class="resource-empty">Loading provider inventory...</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card provider-config-panel" id="provider-config-panel" hidden>
+        <div class="provider-config-header">
+          <div>
+            <h2 id="provider-config-title">Configure provider</h2>
+            <p class="review-note dashboard-note" id="provider-config-description">Save only the minimum connectivity fields for this provider.</p>
+          </div>
+          <div class="provider-config-actions">
+            <button type="button" class="btn btn-secondary" id="provider-config-cancel">Close</button>
+          </div>
+        </div>
+        <div class="provider-config-feedback resource-item-meta" id="provider-config-feedback"></div>
+        <form class="provider-config-form" id="provider-config-form">
+          <input type="hidden" id="provider-config-provider" name="provider">
+
+          <div class="field-grid provider-config-fields" data-provider-fields="aws_ec2_vs" hidden>
+            <label><span>AWS access key</span><input type="text" name="aws_access_key"></label>
+            <label><span>AWS secret access key</span><input type="password" name="aws_secret_access_key"></label>
+            <label><span>AWS session token (optional)</span><input type="password" name="aws_session_token"></label>
+            <label><span>AWS region</span><input type="text" name="aws_region" placeholder="us-east-1"></label>
+          </div>
+
+          <div class="field-grid provider-config-fields" data-provider-fields="gcp_ce_vm" hidden>
+            <label><span>GCP credentials JSON path</span><input type="text" name="gcp_credentials_json" placeholder="/path/to/service-account.json"></label>
+            <label><span>GCP project</span><input type="text" name="gcp_project"></label>
+          </div>
+
+          <div class="field-grid provider-config-fields" data-provider-fields="msazure_vm" hidden>
+            <label><span>Azure subscription ID</span><input type="text" name="azure_subscription_id"></label>
+            <label><span>Azure tenant ID</span><input type="text" name="azure_tenant_id"></label>
+            <label><span>Azure client ID</span><input type="text" name="azure_client_id"></label>
+            <label><span>Azure client secret</span><input type="password" name="azure_client_secret"></label>
+            <label><span>Azure resource group</span><input type="text" name="azure_resource_group_name" placeholder="sap-demo-rg"></label>
+          </div>
+
+          <div class="field-grid provider-config-fields" data-provider-fields="local_kvm" hidden>
+            <label class="wide-field"><span>Libvirt connection URI</span><input type="text" name="kvm_uri" placeholder="qemu:///system"></label>
+          </div>
+
+          <div class="provider-config-form-actions">
+            <button type="button" class="btn btn-secondary" id="provider-config-clear">Forget saved profile</button>
+            <button type="submit" class="btn btn-primary" id="provider-config-save">Save provider profile</button>
+          </div>
+        </form>
+      </section>
+
+      <main class="layout">
+        <aside class="sidebar">
+          <h2>Environment checks</h2>
+          <ul class="check-list">
+            {% for check in checks %}
+              <li class="check {{ 'pass' if check.ok else 'fail' }}">
+                <span class="bullet"></span>
+                <div>
+                  <strong>{{ check.name }}</strong>
+                  <small>{{ check.message }}</small>
+                </div>
+              </li>
+            {% endfor %}
+          </ul>
+          {% if errors %}
+            <div class="error-box">
+              <h3>Fix these before continuing</h3>
+              <ul>
+                {% for error in errors %}
+                  <li>{{ error }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+          {% endif %}
+          {% if preflight_results %}
+            <div class="preflight-box">
+              <h3>Cloud credential preflight</h3>
+              <ul class="check-list">
+                {% for check in preflight_results %}
+                  <li class="check {{ 'pass' if check.ok else 'fail' }}">
+                    <span class="bullet"></span>
+                    <div>
+                      <strong>{{ check.name }}</strong>
+                      <small>{{ check.message }}</small>
+                    </div>
+                  </li>
+                {% endfor %}
+              </ul>
+            </div>
+          {% endif %}
+        </aside>
+
+        <section class="card">
+          {% if recent_jobs %}
+            <details class="home-jobs-box">
+              <summary class="home-jobs-summary">
+                <div>
+                  <h2>Recent jobs</h2>
+                  <p class="review-note">Showing {{ recent_jobs|length }} of {{ total_jobs }} job{{ '' if total_jobs == 1 else 's' }} on the home page.</p>
+                </div>
+              </summary>
+              <div class="home-jobs-toolbar">
+                <a class="btn btn-secondary" href="{{ url_for('jobs_index') }}">Open full jobs page</a>
+              </div>
+              <div class="home-jobs-list">
+                {% for job in recent_jobs %}
+                  <article class="home-job-item">
+                    <div class="home-job-header">
+                      <div>
+                        <a class="home-job-link" href="{{ url_for('job_detail', job_id=job.job_id) }}">Job {{ job.job_id }}</a>
+                        <div class="resource-item-meta">
+                          Status: {{ job.status }}{% if job.platform %} | Platform: {{ job.platform }}{% endif %}{% if job.scenario %} | Scenario: {{ job.scenario }}{% endif %}
+                        </div>
+                      </div>
+                    </div>
+                    <p class="resource-item-meta">{{ job.summary }}</p>
+                    {% if job.instances %}
+                      <div class="home-job-instance-list">
+                        {% for instance in job.instances %}
+                          <div class="resource-item compact">
+                            <div class="resource-item-title">{{ instance.name }}</div>
+                            <div class="resource-item-meta">ID: {{ instance.instance_id }} | State: {{ instance.state }}</div>
+                            <div class="resource-item-meta">Private IP: {{ instance.private_ip or '—' }} | Public IP: {{ instance.public_ip or '—' }}</div>
+                          </div>
+                        {% endfor %}
+                      </div>
+                    {% elif job.resource_message %}
+                      <p class="resource-item-meta">{{ job.resource_message }}</p>
+                    {% endif %}
+                  </article>
+                {% endfor %}
+              </div>
+            </details>
+          {% endif %}
+
+          <form method="post" action="/run" class="wizard-form" id="wizard-form">
+            <div class="step active" data-step="1">
+              <h2>Step 1: Deployment plan</h2>
+              <div class="field-grid">
+                <label>
+                  <span>Scenario</span>
+                  <select name="scenario" required>
+                    <option value="">Select a deployment scenario</option>
+                    {% for scenario in scenarios %}
+                      <option value="{{ scenario.name }}" {% if form.get('scenario') == scenario.name %}selected{% endif %}>{{ scenario.label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+
+                <label>
+                  <span>Provisioning method</span>
+                  <select name="iac_type" id="iac_type" required>
+                    <option value="">Select method</option>
+                    <option value="ansible" {% if form.get('iac_type') == 'ansible' %}selected{% endif %}>Provision hosts with Ansible</option>
+                    <option value="ansible_to_terraform" {% if form.get('iac_type') == 'ansible_to_terraform' %}selected{% endif %}>Ansible + Terraform landing zone</option>
+                    <option value="existing_hosts" {% if form.get('iac_type') == 'existing_hosts' %}selected{% endif %}>Use existing hosts</option>
+                  </select>
+                </label>
+
+                <label id="platform-field">
+                  <span>Platform</span>
+                  <select name="platform" id="platform">
+                    <option value="">Select platform</option>
+                    <option value="aws_ec2_vs" {% if form.get('platform') == 'aws_ec2_vs' %}selected{% endif %}>AWS EC2 Virtual Server</option>
+                    <option value="gcp_ce_vm" {% if form.get('platform') == 'gcp_ce_vm' %}selected{% endif %}>GCP Compute Engine VM</option>
+                    <option value="msazure_vm" {% if form.get('platform') == 'msazure_vm' %}selected{% endif %}>Microsoft Azure VM</option>
+                    <option value="ibmcloud_vs" {% if form.get('platform') == 'ibmcloud_vs' %}selected{% endif %}>IBM Cloud Virtual Server</option>
+                    <option value="ibmcloud_powervs" {% if form.get('platform') == 'ibmcloud_powervs' %}selected{% endif %}>IBM Cloud PowerVS</option>
+                    <option value="ibmpowervm_vm" {% if form.get('platform') == 'ibmpowervm_vm' %}selected{% endif %}>IBM PowerVM</option>
+                    <option value="kubevirt_vm" {% if form.get('platform') == 'kubevirt_vm' %}selected{% endif %}>KubeVirt</option>
+                    <option value="ovirt_vm" {% if form.get('platform') == 'ovirt_vm' %}selected{% endif %}>oVirt / KVM</option>
+                    <option value="vmware_vm" {% if form.get('platform') == 'vmware_vm' %}selected{% endif %}>VMware vSphere</option>
+                    <option value="existing_hosts" {% if form.get('platform') == 'existing_hosts' %}selected{% endif %}>Existing hosts</option>
+                  </select>
+                </label>
+
+                <label id="host-plan-field">
+                  <span>Host specification plan</span>
+                  <select name="host_plan" id="host_plan">
+                    <option value="">Select a host specification plan</option>
+                  </select>
+                  <small>Only plans defined for the selected scenario and platform are shown.</small>
+                </label>
+
+                <div class="wide-field profile-help-box" id="instance-profile-help" style="display:none;"></div>
+
+                <label class="wide-field">
+                  <span>Load wizard input JSON</span>
+                  <input type="file" id="wizard-json-file" accept=".json,application/json">
+                  <small>Upload a JSON object keyed by wizard field names to refill the wizard in one step. Matching fields are overwritten; unknown keys are ignored.</small>
+                  <span class="resource-item-meta" id="wizard-json-status">No JSON file loaded yet.</span>
+                </label>
+ 
+                <label class="wide-field">
+                  <span>DNS root domain</span>
+                  <input name="dns_root_domain" type="text" value="{{ form.get('dns_root_domain', '') }}" placeholder="example.com">
+                </label>
+              </div>
+            </div>
+
+            <div class="step" data-step="2">
+              <h2>Step 2: SAP system details</h2>
+              <div class="field-grid">
+                <label>
+                  <span>System SID</span>
+                  <input name="sid" type="text" value="{{ form.get('sid', '') }}" placeholder="S01" required>
+                </label>
+
+                <label>
+                  <span>HANA DB SID</span>
+                  <input name="hana_sid" type="text" value="{{ form.get('hana_sid', form.get('sid', '')) }}" placeholder="H01">
+                </label>
+
+                <label>
+                  <span>Product</span>
+                  <input name="product" type="text" value="{{ form.get('product', 'sap_s4hana_2023_sandbox') }}" placeholder="sap_s4hana_2023_sandbox">
+                </label>
+
+                <label>
+                  <span>Operating system image</span>
+                  <input name="os_image" type="text" value="{{ form.get('os_image', '') }}" placeholder="sles-15-6-sap-ha or rhel-9-4-sap-ha">
+                </label>
+
+                <label class="wide-field">
+                  <span>Installation media directory</span>
+                  <input name="media_dir" type="text" value="{{ form.get('media_dir', '/software') }}" placeholder="/software" required>
+                </label>
+              </div>
+
+              <div class="field-grid" style="margin-top: 20px;">
+                <div class="wide-field" style="grid-column: 1 / -1;">
+                  <h3 style="margin: 0 0 8px;">HA host definitions (two-node HA)</h3>
+                  <p class="review-note" style="margin: 0 0 12px;">For a two-node HA deployment, provide both hostnames and IPs. The console will inject them into the generated Ansible variables.</p>
+                </div>
+
+                <label>
+                  <span>Primary host name</span>
+                  <input name="ha_primary_hostname" type="text" value="{{ form.get('ha_primary_hostname', '') }}" placeholder="hana-p">
+                </label>
+
+                <label>
+                  <span>Primary host IP</span>
+                  <input name="ha_primary_ip" type="text" value="{{ form.get('ha_primary_ip', '') }}" placeholder="10.0.0.11">
+                </label>
+
+                <label>
+                  <span>Secondary host name</span>
+                  <input name="ha_secondary_hostname" type="text" value="{{ form.get('ha_secondary_hostname', '') }}" placeholder="hana-s">
+                </label>
+
+                <label>
+                  <span>Secondary host IP</span>
+                  <input name="ha_secondary_ip" type="text" value="{{ form.get('ha_secondary_ip', '') }}" placeholder="10.0.0.12">
+                </label>
+
+                <label class="wide-field">
+                  <span>Primary HA VIP</span>
+                  <input name="ha_vip_hana_primary" type="text" value="{{ form.get('ha_vip_hana_primary', '') }}" placeholder="10.250.0.20">
+                </label>
+              </div>
+            </div>
+
+            <div class="step" data-step="3">
+              <h2>Step 3: Deployment settings</h2>
+              <p class="review-note">Provider credentials are managed separately and reused automatically. This step only keeps deployment-specific options.</p>
+
+              <div class="field-grid platform-section" id="aws-fields" style="display:none;">
+                <label><span>AWS AZ</span><input name="aws_vpc_availability_zone" type="text" value="{{ form.get('aws_vpc_availability_zone', '') }}" placeholder="us-east-1a"></label>
+                <label><span>VPC subnet ID</span><input name="aws_vpc_subnet_id" type="text" value="{{ form.get('aws_vpc_subnet_id', '') }}" placeholder="subnet-..."></label>
+                <label><span>Security group names</span><input name="aws_vpc_sg_names" type="text" value="{{ form.get('aws_vpc_sg_names', '') }}" placeholder="sg1,sg2"></label>
+                <label><span>AWS OS image</span><input name="aws_host_os_image" type="text" value="{{ form.get('aws_host_os_image', '') }}" placeholder="sles-15-6-sap-ha"></label>
+                <label><span>SSH key pair name</span><input name="aws_key_pair_name_ssh_host_public_key" type="text" value="{{ form.get('aws_key_pair_name_ssh_host_public_key', '') }}" placeholder="sap-key"></label>
+                <label class="wide-field">
+                  <span>AWS test instance type override (optional)</span>
+                  <input name="aws_instance_type_override" type="text" list="aws-instance-profile-options" value="{{ form.get('aws_instance_type_override', '') }}" placeholder="t3.xlarge">
+                  <datalist id="aws-instance-profile-options"></datalist>
+                  <small>Keeps the selected SAP host plan but replaces each AWS host's EC2 instance type for this generated run. Useful for cheaper provisioning tests; undersized types may fail SAP installation.</small>
+                </label>
+              </div>
+
+              <div class="field-grid platform-section" id="gcp-fields" style="display:none;">
+                <label><span>GCP region/zone</span><input name="gcp_region_zone" type="text" value="{{ form.get('gcp_region_zone', '') }}" placeholder="us-central1-a"></label>
+                <label><span>GCP region</span><input name="gcp_region" type="text" value="{{ form.get('gcp_region', '') }}" placeholder="us-central1"></label>
+                <label><span>VPC name</span><input name="gcp_vpc_name" type="text" value="{{ form.get('gcp_vpc_name', '') }}"></label>
+                <label><span>Subnet name</span><input name="gcp_vpc_subnet_name" type="text" value="{{ form.get('gcp_vpc_subnet_name', '') }}"></label>
+                <label><span>GCP OS image</span><input name="gcp_host_os_image" type="text" value="{{ form.get('gcp_host_os_image', '') }}" placeholder="sles-15-6-sap-ha"></label>
+              </div>
+
+              <div class="field-grid platform-section" id="azure-fields" style="display:none;">
+                <label><span>Azure region</span><input name="azure_region" type="text" value="{{ form.get('azure_region', '') }}" placeholder="westeurope"></label>
+                <label><span>VNet name</span><input name="azure_vnet_name" type="text" value="{{ form.get('azure_vnet_name', '') }}"></label>
+                <label><span>Subnet name</span><input name="azure_vnet_subnet_name" type="text" value="{{ form.get('azure_vnet_subnet_name', '') }}"></label>
+                <label><span>Azure OS image</span><input name="azure_host_os_image" type="text" value="{{ form.get('azure_host_os_image', '') }}" placeholder="sles-15-6-sap-ha"></label>
+                <label><span>SSH key pair name</span><input name="azure_key_pair_name_ssh_host_public_key" type="text" value="{{ form.get('azure_key_pair_name_ssh_host_public_key', '') }}" placeholder="sap-key"></label>
+              </div>
+
+              <div class="field-grid common-credentials">
+                <label class="wide-field">
+                  <span>Use single master password for all SAP passwords</span>
+                  <input type="checkbox" name="use_single_master_password" id="use_single_master_password" {% if form.get('use_single_master_password', true) %}checked{% endif %}>
+                </label>
+
+                <label>
+                  <span>SAP user ID</span>
+                  <input name="sap_id_user" type="text" value="{{ form.get('sap_id_user', '') }}" placeholder="S-user" required>
+                </label>
+
+                <label id="master-password-field">
+                  <span>Master password</span>
+                  <input name="master_password" type="password" value="{{ form.get('master_password', '') }}" placeholder="Strong password">
+                </label>
+
+                <label id="sap-user-password-field">
+                  <span>SAP user password</span>
+                  <input name="sap_id_user_password" type="password" value="{{ form.get('sap_id_user_password', '') }}" placeholder="••••••••">
+                </label>
+
+                <div class="wide-field">
+                  <label class="inline-toggle">
+                    <input type="checkbox" id="use-separate-passwords">
+                    <span>Use separate passwords instead</span>
+                  </label>
+                </div>
+
+                <div class="wide-field password-advanced" id="password-advanced" style="display:none;">
+                  <div class="field-grid">
+                    <label>
+                      <span>System password</span>
+                      <input name="system_password" type="password" value="{{ form.get('system_password', '') }}" placeholder="Strong password">
+                    </label>
+
+                    <label>
+                      <span>DDIC password</span>
+                      <input name="ddic_password" type="password" value="{{ form.get('ddic_password', '') }}" placeholder="Strong password">
+                    </label>
+
+                    <label>
+                      <span>ABAP schema password</span>
+                      <input name="schema_password" type="password" value="{{ form.get('schema_password', '') }}" placeholder="Strong password">
+                    </label>
+
+                    <label>
+                      <span>sidadm password</span>
+                      <input name="sidadm_password" type="password" value="{{ form.get('sidadm_password', '') }}" placeholder="Strong password">
+                    </label>
+                  </div>
+                </div>
+
+                <label>
+                  <span>Bastion public IP</span>
+                  <input name="bastion_public_ip" type="text" value="{{ form.get('bastion_public_ip', '') }}" placeholder="203.0.113.10">
+                </label>
+
+                <label>
+                  <span>Bastion SSH port</span>
+                  <input name="bastion_ssh_port" type="text" value="{{ form.get('bastion_ssh_port', '') }}" placeholder="22">
+                </label>
+
+                <label>
+                  <span>Bastion user</span>
+                  <input name="bastion_user" type="text" value="{{ form.get('bastion_user', '') }}" placeholder="bastionuser">
+                </label>
+
+                <label>
+                  <span>Host SSH private key path</span>
+                  <input name="host_ssh_private_key_file" type="text" value="{{ form.get('host_ssh_private_key_file', '') }}" placeholder="/root/.ssh/id_rsa">
+                </label>
+
+                <label>
+                  <span>Bastion private key path</span>
+                  <input name="bastion_private_key_file" type="text" value="{{ form.get('bastion_private_key_file', '') }}" placeholder="/root/.ssh/bastion_rsa">
+                </label>
+
+                <label>
+                  <span>Optional inventory file</span>
+                  <input name="inventory_file" type="text" value="{{ form.get('inventory_file', '') }}" placeholder="/path/to/inventory.yml">
+                </label>
+              </div>
+            </div>
+
+            <div class="step" data-step="4">
+              <h2>Step 4: Review and run</h2>
+              <div class="review-list">
+                <div><span>Scenario</span><strong id="review-scenario">-</strong></div>
+                <div><span>Provisioning</span><strong id="review-iac">-</strong></div>
+                <div><span>Platform</span><strong id="review-platform">-</strong></div>
+                <div><span>Host plan</span><strong id="review-host-plan">-</strong></div>
+                <div><span>AWS test instance type</span><strong id="review-aws-instance-type">-</strong></div>
+                <div><span>SID</span><strong id="review-sid">-</strong></div>
+                <div><span>HA hosts</span><strong id="review-ha-hosts">-</strong></div>
+                <div><span>HA VIP</span><strong id="review-ha-vip">-</strong></div>
+                <div><span>Media</span><strong id="review-media">-</strong></div>
+              </div>
+
+              <div class="field-grid" style="margin-top: 18px;">
+                <label class="wide-field">
+                  <span>Paste extra YAML overrides (optional)</span>
+                  <textarea name="yaml_override" rows="8" placeholder="sap_vm_provision_ha_vip_hana_primary: 10.250.0.20\n# or any extra variables you want to merge into the scenario file">{{ form.get('yaml_override', '') }}</textarea>
+                </label>
+              </div>
+
+              <p class="review-note">The console generates a concrete Ansible extra vars file, adds the required deployment settings, and then runs the selected automation from the repository root.</p>
+            </div>
+
+            <div class="form-actions">
+              <button type="button" class="btn btn-secondary" id="prev-step">Back</button>
+              <button type="button" class="btn btn-primary" id="next-step">Next</button>
+              <button type="submit" class="btn btn-success" id="submit-step" style="display:none;">Run provisioning</button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const steps = Array.from(document.querySelectorAll('.step'));
+      const nextButton = document.getElementById('next-step');
+      const prevButton = document.getElementById('prev-step');
+      const submitButton = document.getElementById('submit-step');
+      const wizardForm = document.getElementById('wizard-form');
+      const wizardJsonFile = document.getElementById('wizard-json-file');
+      const wizardJsonStatus = document.getElementById('wizard-json-status');
+      const iacType = document.getElementById('iac_type');
+      const platformField = document.getElementById('platform-field');
+      const hostPlanField = document.getElementById('host-plan-field');
+      const scenarioSelect = document.querySelector('[name="scenario"]');
+      const platformSelect = document.getElementById('platform');
+      const hostPlanSelect = document.getElementById('host_plan');
+      const instanceProfileHelp = document.getElementById('instance-profile-help');
+      const awsInstanceProfileOptions = document.getElementById('aws-instance-profile-options');
+      const providerGrid = document.getElementById('provider-grid');
+      const providerInventoryList = document.getElementById('provider-inventory-list');
+      const providerDashboardSummary = document.getElementById('provider-dashboard-summary');
+      const providerDashboardGeneratedAt = document.getElementById('provider-dashboard-generated-at');
+      const refreshDashboardButton = document.getElementById('refresh-dashboard');
+      const providerConfigPanel = document.getElementById('provider-config-panel');
+      const providerConfigForm = document.getElementById('provider-config-form');
+      const providerConfigProvider = document.getElementById('provider-config-provider');
+      const providerConfigTitle = document.getElementById('provider-config-title');
+      const providerConfigDescription = document.getElementById('provider-config-description');
+      const providerConfigFeedback = document.getElementById('provider-config-feedback');
+      const providerConfigCancelButton = document.getElementById('provider-config-cancel');
+      const providerConfigClearButton = document.getElementById('provider-config-clear');
+      const providerConfigSaveButton = document.getElementById('provider-config-save');
+      const useSingleMasterPassword = document.getElementById('use_single_master_password');
+      const useSeparatePasswords = document.getElementById('use-separate-passwords');
+      const passwordAdvanced = document.getElementById('password-advanced');
+      const masterPasswordField = document.querySelector('[name="master_password"]');
+      const platformLabels = {
+        aws_ec2_vs: 'AWS EC2',
+        gcp_ce_vm: 'GCP Compute Engine',
+        msazure_vm: 'Azure VM',
+        local_kvm: 'Local KVM',
+        ibmcloud_vs: 'IBM Cloud Virtual Server',
+        ibmcloud_powervs: 'IBM Cloud PowerVS',
+        ibmpowervm_vm: 'IBM PowerVM',
+        kubevirt_vm: 'KubeVirt',
+        ovirt_vm: 'oVirt/KVM',
+        vmware_vm: 'VMware vSphere',
+        existing_hosts: 'Existing hosts'
+      };
+      const providerConfigMetadata = {
+        aws_ec2_vs: {
+          title: 'Configure AWS connectivity',
+          description: 'Save only the minimum fields needed to reach AWS and list EC2 instances.',
+          required: ['aws_access_key', 'aws_secret_access_key', 'aws_region']
+        },
+        gcp_ce_vm: {
+          title: 'Configure GCP connectivity',
+          description: 'Save only the minimum fields needed to reach GCP and list Compute Engine instances.',
+          required: ['gcp_credentials_json', 'gcp_project']
+        },
+        msazure_vm: {
+          title: 'Configure Azure connectivity',
+          description: 'Save only the minimum fields needed to reach Azure and list virtual machines in one resource group.',
+          required: ['azure_subscription_id', 'azure_tenant_id', 'azure_client_id', 'azure_client_secret', 'azure_resource_group_name']
+        },
+        local_kvm: {
+          title: 'Configure local KVM connectivity',
+          description: 'Set the libvirt URI used for local VM inventory checks.',
+          required: []
+        }
+      };
+
+      let currentStep = 0;
+
+      function escapeHtml(value) {
+        return String(value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function formatTimestamp(unixSeconds) {
+        if (!unixSeconds) return 'Not loaded yet';
+        return `Last refreshed ${new Date(unixSeconds * 1000).toLocaleString()}`;
+      }
+
+      function setWizardJsonStatus(message, isError = false) {
+        wizardJsonStatus.textContent = message;
+        wizardJsonStatus.classList.toggle('error-text', isError);
+        wizardJsonStatus.classList.toggle('success-text', !isError && message !== 'No JSON file loaded yet.');
+      }
+
+      function assignWizardFieldValue(name, value) {
+        const element = wizardForm.querySelector(`[name="${name}"]`);
+        if (!element) {
+          return false;
+        }
+
+        if (element.type === 'checkbox') {
+          element.checked = Boolean(value);
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+
+        element.value = value === null || value === undefined ? '' : String(value);
+        const eventName = element.tagName === 'SELECT' ? 'change' : 'input';
+        element.dispatchEvent(new Event(eventName, { bubbles: true }));
+        return true;
+      }
+
+      function applyWizardJsonInput(rawInput) {
+        const payload = rawInput && typeof rawInput === 'object' && !Array.isArray(rawInput) && rawInput.form && typeof rawInput.form === 'object'
+          ? rawInput.form
+          : rawInput;
+
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          throw new Error('The JSON file must contain an object keyed by wizard field names.');
+        }
+
+        ['scenario', 'iac_type', 'platform'].forEach((key) => {
+          if (Object.prototype.hasOwnProperty.call(payload, key)) {
+            assignWizardFieldValue(key, payload[key]);
+          }
+        });
+
+        refreshHostPlanOptions();
+        refreshInstanceProfileHelp();
+        togglePlatformFields();
+        togglePlatformSpecificSections();
+
+        Object.entries(payload).forEach(([key, value]) => {
+          if (['scenario', 'iac_type', 'platform', 'host_plan'].includes(key)) {
+            return;
+          }
+          assignWizardFieldValue(key, value);
+        });
+
+        if (Object.prototype.hasOwnProperty.call(payload, 'host_plan')) {
+          hostPlanSelect.dataset.currentValue = String(payload.host_plan || '');
+          refreshHostPlanOptions();
+          hostPlanSelect.value = String(payload.host_plan || '');
+          hostPlanSelect.dataset.currentValue = hostPlanSelect.value;
+        }
+
+        togglePasswordMode();
+        refreshInstanceProfileHelp();
+        togglePlatformFields();
+        togglePlatformSpecificSections();
+        updateReview();
+      }
+
+      async function loadWizardJsonFile() {
+        const [file] = wizardJsonFile.files || [];
+        if (!file) {
+          setWizardJsonStatus('No JSON file loaded yet.');
+          return;
+        }
+
+        try {
+          const parsed = JSON.parse(await file.text());
+          applyWizardJsonInput(parsed);
+          setWizardJsonStatus(`Loaded ${file.name}.`);
+        } catch (error) {
+          setWizardJsonStatus(error.message || 'Unable to read the JSON input file.', true);
+        }
+      }
+
+      function renderDashboardSummary(summary) {
+        providerDashboardSummary.innerHTML = `
+          <div class="dashboard-summary-item">
+            <strong>${summary.connected}</strong>
+            <span>Providers connected</span>
+          </div>
+          <div class="dashboard-summary-item">
+            <strong>${summary.attention}</strong>
+            <span>Need attention</span>
+          </div>
+          <div class="dashboard-summary-item">
+            <strong>${summary.resources}</strong>
+            <span>Visible resources</span>
+          </div>
+        `;
+      }
+
+      function renderProviderCards(providers) {
+        if (!providers.length) {
+          providerGrid.innerHTML = '<article class="provider-card"><p class="resource-empty">No provider cards available.</p></article>';
+          return;
+        }
+
+        providerGrid.innerHTML = providers.map((provider) => `
+          <article class="provider-card provider-card-${escapeHtml(provider.accent)}">
+            <div class="provider-card-title-row">
+              <h3>${escapeHtml(platformLabels[provider.provider] || provider.provider)}</h3>
+              <span class="provider-status provider-status-${escapeHtml(provider.status)}">${escapeHtml(provider.status)}</span>
+            </div>
+            <p>${escapeHtml(provider.summary)}</p>
+            ${provider.details.length ? `<ul class="provider-detail-list">${provider.details.map((detail) => `<li>${escapeHtml(detail)}</li>`).join('')}</ul>` : ''}
+            ${providerConfigMetadata[provider.provider] ? `<div class="provider-card-actions"><button type="button" class="btn btn-secondary" data-configure-provider="${escapeHtml(provider.provider)}">${provider.status === 'connected' ? 'Review provider settings' : 'Configure provider'}</button></div>` : ''}
+            <div class="provider-card-footer">${provider.resources.length} visible resource${provider.resources.length === 1 ? '' : 's'}</div>
+          </article>
+        `).join('');
+      }
+
+      function renderInventory(resources) {
+        if (!resources.length) {
+          providerInventoryList.innerHTML = '<div class="resource-empty">No provider resources are visible right now.</div>';
+          return;
+        }
+
+        providerInventoryList.innerHTML = resources.map((resource) => `
+          <article class="inventory-item inventory-item-${escapeHtml(resource.accent)}">
+            <div class="inventory-item-header">
+              <div>
+                <div class="inventory-item-title-row">
+                  <span class="provider-tag provider-tag-${escapeHtml(resource.accent)}">${escapeHtml(platformLabels[resource.provider] || resource.provider)}</span>
+                  <strong>${escapeHtml(resource.name)}</strong>
+                </div>
+                <div class="resource-item-meta">${escapeHtml(resource.summary || 'No summary available.')}</div>
+              </div>
+              <span class="inventory-state">${escapeHtml(resource.state || 'unknown')}</span>
+            </div>
+            <div class="inventory-metadata">
+              <span>ID: ${escapeHtml(resource.resource_id || 'n/a')}</span>
+              ${resource.private_ip ? `<span>Private IP: ${escapeHtml(resource.private_ip)}</span>` : ''}
+              ${resource.public_ip ? `<span>Public IP: ${escapeHtml(resource.public_ip)}</span>` : ''}
+              ${(resource.metadata || []).map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+            </div>
+            ${resource.deletable ? `<div class="inventory-actions"><button type="button" class="btn btn-danger" data-dashboard-delete="${escapeHtml(resource.provider)}" data-delete-payload="${encodeURIComponent(JSON.stringify(resource.delete_payload || {}))}" data-resource-name="${escapeHtml(resource.name)}">Delete</button></div>` : ''}
+          </article>
+        `).join('');
+      }
+
+      async function loadProviderDashboard(forceRefresh = false) {
+        refreshDashboardButton.disabled = true;
+        try {
+          const suffix = forceRefresh ? '?refresh=1' : '';
+          const response = await fetch(`/api/dashboard/providers${suffix}`);
+          if (!response.ok) {
+            throw new Error('Unable to load provider dashboard');
+          }
+          const payload = await response.json();
+          renderDashboardSummary(payload.summary || { connected: 0, attention: 0, resources: 0 });
+          renderProviderCards(payload.providers || []);
+          renderInventory(payload.resources || []);
+          providerDashboardGeneratedAt.textContent = formatTimestamp(payload.generated_at);
+        } catch (error) {
+          providerGrid.innerHTML = '<article class="provider-card"><p class="resource-empty">Unable to load provider connectivity data.</p></article>';
+          providerInventoryList.innerHTML = '<div class="resource-empty">Unable to load provider inventory.</div>';
+          providerDashboardGeneratedAt.textContent = 'Dashboard refresh failed';
+        } finally {
+          refreshDashboardButton.disabled = false;
+        }
+      }
+
+      async function deleteDashboardResource(button) {
+        const provider = button.dataset.dashboardDelete;
+        const payload = JSON.parse(decodeURIComponent(button.dataset.deletePayload || '%7B%7D'));
+        const resourceName = button.dataset.resourceName || 'this resource';
+        if (!window.confirm(`Delete ${resourceName}? This action cannot be undone.`)) {
+          return;
+        }
+
+        button.disabled = true;
+        try {
+          const response = await fetch(`/api/dashboard/providers/${provider}/delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const result = await response.json();
+          if (!response.ok || result.status !== 'ok') {
+            throw new Error(result.message || 'Delete request failed');
+          }
+          await loadProviderDashboard(true);
+        } catch (error) {
+          window.alert(error.message || 'Unable to delete the selected resource.');
+          button.disabled = false;
+        }
+      }
+
+      function clearProviderConfigFeedback() {
+        providerConfigFeedback.textContent = '';
+        providerConfigFeedback.classList.remove('success-text', 'error-text');
+      }
+
+      function toggleProviderConfigSections(provider) {
+        document.querySelectorAll('.provider-config-fields').forEach((section) => {
+          const matches = section.dataset.providerFields === provider;
+          section.hidden = !matches;
+          section.querySelectorAll('input').forEach((input) => {
+            input.required = matches && (providerConfigMetadata[provider]?.required || []).includes(input.name);
+          });
+        });
+      }
+
+      function resetProviderConfigForm(provider) {
+        providerConfigForm.reset();
+        providerConfigProvider.value = provider;
+        providerConfigTitle.textContent = providerConfigMetadata[provider].title;
+        providerConfigDescription.textContent = providerConfigMetadata[provider].description;
+        providerConfigClearButton.disabled = false;
+        providerConfigSaveButton.disabled = false;
+        clearProviderConfigFeedback();
+        toggleProviderConfigSections(provider);
+      }
+
+      async function populateProviderConfigForm(provider) {
+        const response = await fetch(`/api/credentials/${provider}`);
+        if (!response.ok) {
+          throw new Error('Unable to load saved provider profile.');
+        }
+        const payload = await response.json();
+        Object.entries(payload).forEach(([key, value]) => {
+          const field = providerConfigForm.querySelector(`[name="${key}"]`);
+          if (!field) {
+            return;
+          }
+          field.value = value === '***redacted***' ? '' : value;
+        });
+      }
+
+      async function openProviderConfiguration(provider) {
+        if (!providerConfigMetadata[provider]) {
+          return;
+        }
+        resetProviderConfigForm(provider);
+        providerConfigPanel.hidden = false;
+        providerConfigPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        try {
+          await populateProviderConfigForm(provider);
+        } catch (error) {
+          providerConfigFeedback.textContent = error.message || 'Unable to load provider profile.';
+          providerConfigFeedback.classList.add('error-text');
+        }
+        const firstField = providerConfigForm.querySelector(`.provider-config-fields[data-provider-fields="${provider}"] input`);
+        if (firstField) {
+          window.setTimeout(() => firstField.focus(), 200);
+        }
+      }
+
+      function closeProviderConfiguration() {
+        providerConfigPanel.hidden = true;
+        providerConfigForm.reset();
+        clearProviderConfigFeedback();
+      }
+
+      async function saveProviderConfiguration(event) {
+        event.preventDefault();
+        const provider = providerConfigProvider.value;
+        if (!provider) {
+          return;
+        }
+
+        const payload = {};
+        const activeFields = providerConfigForm.querySelectorAll(`.provider-config-fields[data-provider-fields="${provider}"] input`);
+        activeFields.forEach((field) => {
+          payload[field.name] = field.value.trim();
+        });
+
+        providerConfigSaveButton.disabled = true;
+        providerConfigClearButton.disabled = true;
+        clearProviderConfigFeedback();
+        try {
+          const response = await fetch(`/api/credentials/${provider}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          const result = await response.json();
+          if (!response.ok || result.status !== 'ok') {
+            throw new Error(result.message || 'Unable to save provider profile.');
+          }
+          providerConfigFeedback.textContent = 'Provider profile saved.';
+          providerConfigFeedback.classList.add('success-text');
+          await loadProviderDashboard(true);
+        } catch (error) {
+          providerConfigFeedback.textContent = error.message || 'Unable to save provider profile.';
+          providerConfigFeedback.classList.add('error-text');
+        } finally {
+          providerConfigSaveButton.disabled = false;
+          providerConfigClearButton.disabled = false;
+        }
+      }
+
+      async function clearProviderConfiguration() {
+        const provider = providerConfigProvider.value;
+        if (!provider) {
+          return;
+        }
+        if (!window.confirm('Forget the saved profile for this provider?')) {
+          return;
+        }
+        providerConfigSaveButton.disabled = true;
+        providerConfigClearButton.disabled = true;
+        clearProviderConfigFeedback();
+        try {
+          const response = await fetch(`/api/credentials/${provider}/clear`, { method: 'POST' });
+          const result = await response.json();
+          if (!response.ok || result.status !== 'cleared') {
+            throw new Error(result.message || 'Unable to forget saved profile.');
+          }
+          resetProviderConfigForm(provider);
+          providerConfigFeedback.textContent = 'Saved provider profile removed.';
+          providerConfigFeedback.classList.add('success-text');
+          await loadProviderDashboard(true);
+        } catch (error) {
+          providerConfigFeedback.textContent = error.message || 'Unable to forget saved profile.';
+          providerConfigFeedback.classList.add('error-text');
+        } finally {
+          providerConfigSaveButton.disabled = false;
+          providerConfigClearButton.disabled = false;
+        }
+      }
+
+      function togglePlatformFields() {
+        const isExistingHosts = iacType.value === 'existing_hosts';
+        platformField.style.display = isExistingHosts ? 'none' : 'block';
+        hostPlanField.style.display = isExistingHosts ? 'none' : 'block';
+      }
+
+      function refreshHostPlanOptions() {
+        const scenario = scenarioSelect.value;
+        const platform = platformSelect.value;
+        const currentValue = hostPlanSelect.dataset.currentValue || hostPlanSelect.value || '';
+        const catalog = window.hostPlanCatalog || {};
+        const plans = (((catalog[scenario] || {})[platform]) || []);
+
+        if (iacType.value === 'existing_hosts') {
+          hostPlanSelect.innerHTML = '<option value="existing_hosts">existing_hosts</option>';
+          hostPlanSelect.value = 'existing_hosts';
+          hostPlanSelect.dataset.currentValue = 'existing_hosts';
+          return;
+        }
+
+        const options = ['<option value="">Select a host specification plan</option>'];
+        plans.forEach((plan) => {
+          options.push(`<option value="${plan}">${plan}</option>`);
+        });
+
+        if (currentValue && currentValue !== 'existing_hosts' && !plans.includes(currentValue)) {
+          options.push(`<option value="${currentValue}">${currentValue} (not valid for this scenario/platform)</option>`);
+        }
+
+        hostPlanSelect.innerHTML = options.join('');
+
+        if (plans.includes(currentValue)) {
+          hostPlanSelect.value = currentValue;
+        } else if (plans.length) {
+          hostPlanSelect.value = plans[0];
+        } else if (currentValue) {
+          hostPlanSelect.value = currentValue;
+        } else {
+          hostPlanSelect.value = '';
+        }
+
+        hostPlanSelect.dataset.currentValue = hostPlanSelect.value;
+      }
+
+      function refreshInstanceProfileHelp() {
+        const scenario = scenarioSelect.value;
+        const platform = platformSelect.value;
+        const hostPlan = hostPlanSelect.value;
+        const catalog = window.instanceProfileCatalog || {};
+        const platformData = ((catalog[scenario] || {})[platform]) || null;
+
+        if (awsInstanceProfileOptions) {
+          awsInstanceProfileOptions.innerHTML = '';
+        }
+
+        if (iacType.value === 'existing_hosts' || !platformData) {
+          instanceProfileHelp.style.display = 'none';
+          instanceProfileHelp.innerHTML = '';
+          return;
+        }
+
+        const allProfiles = platformData.all_profiles || [];
+        const planProfiles = ((platformData.plans || {})[hostPlan]) || [];
+
+        if (awsInstanceProfileOptions && platform === 'aws_ec2_vs') {
+          awsInstanceProfileOptions.innerHTML = allProfiles.map((profile) => `<option value="${profile}"></option>`).join('');
+        }
+
+        const defaultsMarkup = planProfiles.length
+          ? `<ul>${planProfiles.map((item) => `<li><strong>${item.host}</strong>: ${item.profile}</li>`).join('')}</ul>`
+          : '<p>No default instance profiles were found for the selected host plan.</p>';
+
+        const allProfilesMarkup = allProfiles.length
+          ? allProfiles.map((profile) => `<code>${profile}</code>`).join(' ')
+          : 'No repository-defined profiles found.';
+
+        instanceProfileHelp.innerHTML = `
+          <div class="profile-help-title">Known instance profiles for this scenario</div>
+          <p class="resource-item-meta">These values come from this repository's scenario templates for ${platformLabels[platform] || platform}.</p>
+          <div class="profile-help-grid">
+            <div>
+              <strong>Default profiles in selected host plan</strong>
+              ${defaultsMarkup}
+            </div>
+            <div>
+              <strong>Repository-known profiles for this provider</strong>
+              <p class="profile-tag-list">${allProfilesMarkup}</p>
+            </div>
+          </div>
+        `;
+        instanceProfileHelp.style.display = 'block';
+      }
+
+      function togglePlatformSpecificSections() {
+        const platform = platformSelect.value;
+        document.querySelectorAll('.platform-section').forEach((node) => {
+          node.style.display = 'none';
+        });
+        if (platform === 'aws_ec2_vs') {
+          document.getElementById('aws-fields').style.display = 'grid';
+        } else if (platform === 'gcp_ce_vm') {
+          document.getElementById('gcp-fields').style.display = 'grid';
+        } else if (platform === 'msazure_vm') {
+          document.getElementById('azure-fields').style.display = 'grid';
+        }
+      }
+
+      function togglePasswordMode() {
+        const singleMode = useSingleMasterPassword.checked;
+        if (useSeparatePasswords) {
+          useSeparatePasswords.checked = !singleMode;
+        }
+        if (passwordAdvanced) {
+          passwordAdvanced.style.display = singleMode ? 'none' : 'block';
+        }
+
+        const sapIdUser = document.querySelector('[name="sap_id_user"]');
+        const sapIdUserPassword = document.querySelector('[name="sap_id_user_password"]');
+        const systemPassword = document.querySelector('[name="system_password"]');
+        const ddicPassword = document.querySelector('[name="ddic_password"]');
+        const schemaPassword = document.querySelector('[name="schema_password"]');
+        const sidadmPassword = document.querySelector('[name="sidadm_password"]');
+
+        if (sapIdUser) {
+          sapIdUser.required = true;
+          sapIdUser.disabled = false;
+        }
+        if (sapIdUserPassword) {
+          sapIdUserPassword.required = true;
+          sapIdUserPassword.disabled = false;
+          const sapPasswordLabel = sapIdUserPassword.closest('label');
+          if (sapPasswordLabel) {
+            sapPasswordLabel.style.opacity = '1';
+          }
+        }
+
+        [systemPassword, ddicPassword, schemaPassword, sidadmPassword].forEach((field) => {
+          if (!field) return;
+          field.disabled = singleMode;
+          field.required = !singleMode;
+          const label = field.closest('label');
+          if (label) {
+            label.style.opacity = field.disabled ? '0.6' : '1';
+          }
+        });
+
+        if (masterPasswordField) {
+          masterPasswordField.required = true;
+        }
+      }
+
+      function updateReview() {
+        const primaryHost = document.querySelector('[name="ha_primary_hostname"]').value || '—';
+        const secondaryHost = document.querySelector('[name="ha_secondary_hostname"]').value || '—';
+        const vip = document.querySelector('[name="ha_vip_hana_primary"]').value || '—';
+
+        document.getElementById('review-scenario').textContent = scenarioSelect.value || '—';
+        document.getElementById('review-iac').textContent = document.querySelector('[name="iac_type"]').value || '—';
+        document.getElementById('review-platform').textContent = platformSelect.value || '—';
+        document.getElementById('review-host-plan').textContent = hostPlanSelect.value || '—';
+        document.getElementById('review-aws-instance-type').textContent = document.querySelector('[name="aws_instance_type_override"]').value || '—';
+        document.getElementById('review-sid').textContent = document.querySelector('[name="sid"]').value || '—';
+        document.getElementById('review-ha-hosts').textContent = primaryHost === '—' && secondaryHost === '—' ? '—' : `${primaryHost} / ${secondaryHost}`;
+        document.getElementById('review-ha-vip').textContent = vip;
+        document.getElementById('review-media').textContent = document.querySelector('[name="media_dir"]').value || '—';
+      }
+
+      function updateStepUI() {
+        steps.forEach((step, index) => {
+          step.classList.toggle('active', index === currentStep);
+        });
+        prevButton.style.visibility = currentStep === 0 ? 'hidden' : 'visible';
+        nextButton.style.display = currentStep === steps.length - 1 ? 'none' : 'inline-flex';
+        submitButton.style.display = currentStep === steps.length - 1 ? 'inline-flex' : 'none';
+        updateReview();
+      }
+
+      nextButton.addEventListener('click', () => {
+        const fields = steps[currentStep].querySelectorAll('input[required], select[required]');
+        let valid = true;
+        fields.forEach((field) => {
+          if (!field.disabled && !field.value.trim()) {
+            field.reportValidity();
+            valid = false;
+          }
+        });
+        if (!valid) return;
+        if (currentStep < steps.length - 1) currentStep += 1;
+        updateStepUI();
+      });
+
+      prevButton.addEventListener('click', () => {
+        if (currentStep > 0) currentStep -= 1;
+        updateStepUI();
+      });
+
+      iacType.addEventListener('change', togglePlatformFields);
+      iacType.addEventListener('change', refreshHostPlanOptions);
+      iacType.addEventListener('change', refreshInstanceProfileHelp);
+      scenarioSelect.addEventListener('change', () => {
+        refreshHostPlanOptions();
+        refreshInstanceProfileHelp();
+        updateReview();
+      });
+      platformSelect.addEventListener('change', () => {
+        refreshHostPlanOptions();
+        refreshInstanceProfileHelp();
+        togglePlatformSpecificSections();
+        updateReview();
+      });
+      hostPlanSelect.addEventListener('change', () => {
+        hostPlanSelect.dataset.currentValue = hostPlanSelect.value;
+        refreshInstanceProfileHelp();
+        updateReview();
+      });
+      useSingleMasterPassword.addEventListener('change', () => {
+        togglePasswordMode();
+      });
+      if (useSeparatePasswords) {
+        useSeparatePasswords.addEventListener('change', () => {
+          useSingleMasterPassword.checked = !useSeparatePasswords.checked;
+          togglePasswordMode();
+        });
+      }
+
+      providerInventoryList.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-dashboard-delete]');
+        if (!button) return;
+        deleteDashboardResource(button);
+      });
+
+      providerGrid.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-configure-provider]');
+        if (!button) return;
+        openProviderConfiguration(button.dataset.configureProvider);
+      });
+
+      refreshDashboardButton.addEventListener('click', () => {
+        loadProviderDashboard(true);
+      });
+      providerConfigForm.addEventListener('submit', saveProviderConfiguration);
+      providerConfigCancelButton.addEventListener('click', closeProviderConfiguration);
+      providerConfigClearButton.addEventListener('click', clearProviderConfiguration);
+
+      scenarioSelect.addEventListener('input', updateReview);
+      document.querySelector('[name="sid"]').addEventListener('input', updateReview);
+      document.querySelector('[name="media_dir"]').addEventListener('input', updateReview);
+      document.querySelector('[name="iac_type"]').addEventListener('change', updateReview);
+      document.querySelector('[name="platform"]').addEventListener('change', updateReview);
+      document.querySelector('[name="aws_instance_type_override"]').addEventListener('input', updateReview);
+      document.querySelector('[name="ha_primary_hostname"]').addEventListener('input', updateReview);
+      document.querySelector('[name="ha_secondary_hostname"]').addEventListener('input', updateReview);
+      document.querySelector('[name="ha_vip_hana_primary"]').addEventListener('input', updateReview);
+      wizardJsonFile.addEventListener('change', loadWizardJsonFile);
+
+      hostPlanSelect.dataset.currentValue = {{ form.get('host_plan', '')|tojson }};
+      refreshHostPlanOptions();
+      refreshInstanceProfileHelp();
+      togglePlatformFields();
+      togglePlatformSpecificSections();
+      togglePasswordMode();
+      updateStepUI();
+      loadProviderDashboard();
+    </script>
+  </body>
+</html>

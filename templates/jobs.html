@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Job History</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="page-header compact">
+        <div>
+          <p class="eyebrow">Run history</p>
+          <h1>Jobs</h1>
+          <p class="review-note">Browse previous runs and reopen the live job page when needed.</p>
+        </div>
+        <a href="/" class="btn btn-secondary">Back to wizard</a>
+      </header>
+
+      <main class="card">
+        <div class="jobs-header">
+          <div class="job-summary">Total jobs: {{ total_jobs }}</div>
+        </div>
+
+        {% if jobs %}
+          <div class="home-jobs-list">
+            {% for job in jobs %}
+              <article class="home-job-item">
+                <div class="home-job-header">
+                  <div>
+                    <a class="home-job-link" href="{{ url_for('job_detail', job_id=job.job_id) }}">Job {{ job.job_id }}</a>
+                    <div class="resource-item-meta">
+                      Status: {{ job.status }}{% if job.platform %} | Platform: {{ job.platform }}{% endif %}{% if job.scenario %} | Scenario: {{ job.scenario }}{% endif %}
+                    </div>
+                  </div>
+                </div>
+                <p class="resource-item-meta">{{ job.summary }}</p>
+                {% if job.instances %}
+                  <div class="home-job-instance-list">
+                    {% for instance in job.instances %}
+                      <div class="resource-item compact">
+                        <div class="resource-item-title">{{ instance.name }}</div>
+                        <div class="resource-item-meta">ID: {{ instance.instance_id }} | State: {{ instance.state }}</div>
+                        <div class="resource-item-meta">Private IP: {{ instance.private_ip or '—' }} | Public IP: {{ instance.public_ip or '—' }}</div>
+                      </div>
+                    {% endfor %}
+                  </div>
+                {% elif job.resource_message %}
+                  <p class="resource-item-meta">{{ job.resource_message }}</p>
+                {% endif %}
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="resource-empty">No jobs have been recorded yet.</div>
+        {% endif %}
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+services:
+  sap-wizard:
+    build:
+      context: .
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_SECRET_KEY: "${FLASK_SECRET_KEY:-change-me}"
+      SAP_WIZARD_STATE_DIR: /var/lib/sap-wizard
+      PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+    volumes:
+      - ./container-data:/var/lib/sap-wizard
+      - ${SAP_MEDIA_DIR:-./media}:/mnt/media:ro
+      - ${SAP_SSH_DIR:-./ssh}:/mnt/ssh:ro
+      # Override SAP_MEDIA_DIR and SAP_SSH_DIR per workstation, for example:
+      #   SAP_MEDIA_DIR=/data/LL/sapsoftware
+      #   SAP_SSH_DIR=/home/ksanjeet/.ssh
+      # For local KVM/libvirt support, also mount the libvirt socket:
+      # - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
