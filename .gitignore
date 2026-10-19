@@ -19,6 +19,7 @@
 generated/
 container-data/
 .sap_wizard_credentials.json
+*.local.json
 .env
 .env.*
 !.env.example

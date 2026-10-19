@@ -89,7 +89,15 @@ python app.py
 
 Then open http://localhost:5000 and follow the steps in the console. The home page now leads with provider connectivity and live inventory for AWS, GCP, Azure, and local KVM, then guides you through provisioning. If a provider is not connected, its dashboard card opens a separate provider-profile form with only the minimum connectivity fields for that provider, instead of sending you into the provisioning console. The UI validates Python, Ansible, SSH, and repository prerequisites before execution and displays a live log view while the automation runs.
 
-If you do not want to re-enter values each time, the wizard can also import a JSON file keyed by wizard field names. A ready-to-upload example for the AWS SAP HANA HA flow lives at [sample-inputs/sap_hana_ha_aws_test_32gb.json](/data/LL/git/ksanjeet/provisioning-console/sample-inputs/sap_hana_ha_aws_test_32gb.json).
+If you do not want to re-enter values each time, the wizard can also import a JSON file keyed by wizard field names. The AWS SAP HANA HA input template is [sample-inputs/sap_hana_ha_aws_test_32gb.template.json](sample-inputs/sap_hana_ha_aws_test_32gb.template.json). It contains placeholders rather than account credentials or deployment-specific network values.
+
+Create a private input file before filling in your own values:
+
+```bash
+cp sample-inputs/sap_hana_ha_aws_test_32gb.template.json sample-inputs/sap_hana_ha_aws_test_32gb.local.json
+```
+
+Replace all `ENTER_*` placeholders in the local copy, adjust the example defaults to your deployment, and upload that copy to the wizard. Files named `*.local.json` are excluded from Git and Docker build contexts; keep them in an encrypted backup if needed. Do not put real values in the tracked template or force-add private input files. Use provider configuration for cloud credentials.
 
 #### Portable containerized web UI
 To freeze the UI and its automation dependencies, this repository now includes a pinned container build:

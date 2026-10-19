@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -63,6 +64,25 @@ class WizardProfileSectionTests(unittest.TestCase):
             response = client.get("/api/credentials/aws_ec2_vs")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), profile)
+
+
+class WizardInputTemplateTests(unittest.TestCase):
+    def test_account_and_deployment_values_are_placeholders(self):
+        path = console.BASE_DIR / "sample-inputs" / "sap_hana_ha_aws_test_32gb.template.json"
+        template = json.loads(path.read_text())
+        for key in (
+            "sap_id_user", "sap_id_user_password", "master_password",
+            "dns_root_domain", "sid", "hana_sid", "os_image",
+            "ha_primary_ip", "ha_secondary_ip", "ha_vip_hana_primary",
+            "aws_region", "aws_vpc_availability_zone", "aws_vpc_subnet_id",
+            "aws_vpc_sg_names", "aws_host_os_image",
+            "aws_key_pair_name_ssh_host_public_key", "bastion_public_ip",
+        ):
+            with self.subTest(key=key):
+                self.assertTrue(template[key].startswith("ENTER_"))
+        self.assertEqual(template["scenario"], "sap_hana_ha")
+        self.assertEqual(template["platform"], "aws_ec2_vs")
+        self.assertIs(template["use_single_master_password"], True)
 
 
 class HanaLogModeTests(unittest.TestCase):

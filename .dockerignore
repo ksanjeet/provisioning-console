@@ -6,5 +6,6 @@ container-data
 generated
 .sap_wizard_credentials.json
 **/.sap_wizard_credentials.json
+**/*.local.json
 .env
 .env.*
