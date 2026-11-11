@@ -6,6 +6,20 @@
 sap_ha_pacemaker_cluster_msazure_subscription_id: "{{ sap_vm_provision_msazure_subscription_id }}"
 sap_ha_pacemaker_cluster_msazure_resource_group: "{{ sap_vm_provision_msazure_resource_group_name }}"
 
+# High Availability fencing:
+# - sbd_shared_disk: SBD on an Azure shared disk attached to both HANA VMs, no IAM role required (Contributor is sufficient)
+# - fence_azure_arm: Azure Fence Agent with VM Managed Identity, requires Owner or User Access Administrator for the IAM role
+sap_vm_provision_msazure_ha_fencing_method: "sbd_shared_disk"
+
+# SLES for SAP images install classic SAPHanaSR, replace it with SAPHanaSR-angi before the cluster setup
+sap_ha_pacemaker_cluster_saphanasr_angi_force: true
+
+# Outbound access of the SAP hosts (they have no public IP). Without a NAT Gateway (or other egress) on the subnet,
+# use a web forward proxy (e.g. on the bastion) for SUSE/RHEL repositories, and download SAP media on the execution node.
+# sap_vm_provision_proxy_web_forward_proxy_ip: "ENTER_STRING_VALUE_HERE"  # IP:Port, e.g. 10.0.0.4:3128 (String).
+# sap_vm_provision_proxy_web_forward_exclusions: "localhost,127.0.0.1,169.254.169.254,ENTER_SUBNET_CIDR,.ENTER_DNS_DOMAIN"
+# sap_software_download_on_execution_node: true
+
 
 #### Bastion server details ####
 # Bastion variables are used when sap_vm_provision_bastion_execution is set to `true`
@@ -316,6 +330,10 @@ sap_vm_provision_msazure_vm_host_os_image_dictionary:
   sles-15-6-sap-ha:
     publisher: "SUSE"
     offer: "sles-sap-15-sp6"
+    sku: "gen2"
+  sles-15-7-sap-ha:
+    publisher: "SUSE"
+    offer: "sles-sap-15-sp7"
     sku: "gen2"
   sles-15-1-sap-byos:
     publisher: "SUSE"

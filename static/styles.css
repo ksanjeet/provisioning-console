@@ -236,6 +236,10 @@ h1 {
   border-top-color: #7c3aed;
 }
 
+.provider-card-cloudstack {
+  border-top-color: #16a34a;
+}
+
 .provider-card-title-row,
 .inventory-item-header,
 .inventory-item-title-row {
@@ -358,6 +362,10 @@ h1 {
   border-left: 4px solid #7c3aed;
 }
 
+.inventory-item-cloudstack {
+  border-left: 4px solid #16a34a;
+}
+
 .inventory-state {
   font-weight: 700;
   color: var(--primary);
@@ -390,6 +398,11 @@ h1 {
 .provider-tag-kvm {
   background: rgba(124, 58, 237, 0.12);
   color: #6d28d9;
+}
+
+.provider-tag-cloudstack {
+  background: rgba(22, 163, 74, 0.12);
+  color: #15803d;
 }
 
 .inventory-metadata {

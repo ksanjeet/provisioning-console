@@ -1,0 +1,156 @@
+---
+# EXPERIMENTAL - Apache CloudStack (any hypervisor and Primary Storage, selected by Template and Disk Offering)
+# Requires the Ansible Collection community.sap_infrastructure with the 'cloudstack_vm' platform
+# and the Ansible Collection ngine_io.cloudstack (Python library 'cs').
+
+#### Scenario specific infrastructure platform variables ####
+
+
+#### Bastion server details ####
+# Bastion variables are used when sap_vm_provision_bastion_execution is set to `true`
+# Not required when the execution node has direct connectivity to the CloudStack Guest Network.
+sap_vm_provision_bastion_execution: false
+# sap_vm_provision_bastion_user: "ENTER_STRING_VALUE_HERE"  # Bastion user name (String).
+# sap_vm_provision_bastion_ssh_port: "ENTER_STRING_VALUE_HERE"  # Bastion SSH port (String).
+# sap_vm_provision_bastion_public_ip: "ENTER_STRING_VALUE_HERE"  # Public IP of the bastion server (String).
+# sap_vm_provision_ssh_bastion_private_key_file_path: "ENTER_STRING_VALUE_HERE"  # Path to bastion server's SSH private key on the execution node (String).
+
+# Path to target host's SSH private key on the execution node (String).
+# The public key (<path>.pub) is registered as CloudStack SSH Key Pair and injected with cloud-init.
+sap_vm_provision_ssh_host_private_key_file_path: "ENTER_STRING_VALUE_HERE"
+
+
+#### Infrastructure platform variables ####
+sap_vm_provision_iac_type: "ansible"  # Only 'ansible' is available for Apache CloudStack (String).
+sap_vm_provision_iac_platform: "cloudstack_vm"  # Name of the provisioning platform (String).
+
+# Apache CloudStack API credentials (String).
+# When commented out, the environment variables CLOUDSTACK_ENDPOINT / CLOUDSTACK_KEY / CLOUDSTACK_SECRET
+# or a cloudstack.ini file ([cloudstack] endpoint/key/secret) are used.
+# sap_vm_provision_cloudstack_api_url: "ENTER_STRING_VALUE_HERE"  # e.g. http://cloudstack.example.com:8080/client/api
+# sap_vm_provision_cloudstack_api_key: "ENTER_STRING_VALUE_HERE"
+# sap_vm_provision_cloudstack_api_secret: "ENTER_STRING_VALUE_HERE"
+# sap_vm_provision_cloudstack_api_verify_ssl_cert: true
+
+sap_vm_provision_cloudstack_zone: "ENTER_STRING_VALUE_HERE"  # CloudStack Zone name (String).
+sap_vm_provision_cloudstack_network_name: "ENTER_STRING_VALUE_HERE"  # Guest Network name, Shared Network recommended (String).
+# sap_vm_provision_cloudstack_domain: "ENTER_STRING_VALUE_HERE"  # Optional (String).
+# sap_vm_provision_cloudstack_account: "ENTER_STRING_VALUE_HERE"  # Optional (String).
+# sap_vm_provision_cloudstack_project: "ENTER_STRING_VALUE_HERE"  # Optional (String).
+
+sap_vm_provision_cloudstack_vm_ssh_keypair_name: "sap-vm-provision"  # CloudStack SSH Key Pair name, created if missing (String).
+sap_vm_provision_cloudstack_vm_disk_offering: "Custom"  # Disk Offering with custom size for data volumes, its storage tags select the Primary Storage (String).
+# sap_vm_provision_cloudstack_vm_hypervisor: "ENTER_STRING_VALUE_HERE"  # Optional: KVM, XenServer, VMware. Default: from Template (String).
+sap_vm_provision_cloudstack_vm_root_disk_size_gb: 50  # Root disk size in GB (Integer).
+sap_vm_provision_cloudstack_vm_affinity_group_name: "sap-hana-ha-anti-affinity"  # Host Anti-Affinity group, one HANA VM per hypervisor host (String).
+
+sap_vm_provision_dns_root_domain: "ENTER_STRING_VALUE_HERE"  # Root domain for DNS entries (e.g., example.com) (String).
+
+# CloudStack Template (OS Image) with cloud-init (CloudStack datasource), see tools/cloudstack/
+sap_vm_provision_cloudstack_vm_host_os_image: "sles4sap_15_7"
+sap_vm_provision_cloudstack_vm_host_os_image_dictionary:
+  sles4sap_15_7: "ENTER_STRING_VALUE_HERE"  # CloudStack Template name (String).
+
+
+#### SAP installation media ####
+# Guest Networks are often without Internet access: download with the S-user on the execution node, then copy to the hosts.
+sap_software_download_on_execution_node: true
+sap_software_download_execution_node_directory: "/var/tmp/sap_media"
+
+
+#### High Availability - Fencing ####
+# sbd_devices:     SBD on shared block device(s) already visible in both HANA VMs (e.g. iSCSI/multipath LUN), any hypervisor/storage.
+# sbd_linstor_kvm: SBD disk created on LINSTOR Primary Storage (DRBD dual-primary) and attached to the KVM domains with virsh.
+#                  Requires KVM, LINSTOR, root admin API user and SSH (root or passwordless sudo) to the KVM hosts.
+#                  NOTE: after a CloudStack VM stop/start, re-run the playbook provisioning to re-attach the SBD disk.
+# none:            no fencing by the provisioning, define e.g. sap_ha_pacemaker_cluster_stonith_custom.
+sap_vm_provision_cloudstack_ha_fencing_method: "sbd_devices"
+sap_vm_provision_cloudstack_ha_sbd_devices:
+  - "ENTER_STRING_VALUE_HERE"  # e.g. /dev/disk/by-id/scsi-36001405... (String).
+
+# Only for sbd_linstor_kvm (LINSTOR controller URL and resource group default to the CloudStack Linstor Primary Storage):
+# sap_vm_provision_cloudstack_ha_sbd_linstor_api_url: "ENTER_STRING_VALUE_HERE"  # e.g. http://kvmhost1:3370 (String).
+# sap_vm_provision_cloudstack_ha_sbd_linstor_resource_group: "ENTER_STRING_VALUE_HERE"  # (String).
+# sap_vm_provision_cloudstack_ha_sbd_size_mib: 100
+# sap_vm_provision_cloudstack_kvm_host_ssh_user: "ENTER_STRING_VALUE_HERE"  # (String).
+# sap_vm_provision_cloudstack_kvm_host_ssh_private_key_file_path: "ENTER_STRING_VALUE_HERE"  # (String).
+
+
+#### High Availability - SAPHanaSR ####
+# The SLES for SAP 'sap-hana' pattern installs classic SAPHanaSR, replace it with SAPHanaSR-angi before the cluster setup.
+sap_ha_pacemaker_cluster_saphanasr_angi_force: true
+
+
+#### additional configuration when provisioning On-Premise hosts ####
+# Only for use when environment does not contain an SNAT for Outbound Internet activity
+# sap_vm_provision_proxy_web_forward_proxy_ip: "ENTER_STRING_VALUE_HERE" # IP:Port only, no http:// prefix
+# sap_vm_provision_proxy_web_forward_exclusions: "localhost,127.0.0.1,{{ sap_vm_provision_dns_root_domain }}"
+
+# OS Package Repo Mirror - CA file downloaded from SUSE RMT for injection to host
+# sap_vm_provision_os_registration_ca_file_path: "ENTER_STRING_VALUE_HERE"
+
+# OS Package Repo Mirror - SLES command example (SUSE_RMT_SERVER must match the RMT server certificate, --yes requires the CA SHA1 fingerprint
+# from 'curl -s http://SUSE_RMT_SERVER/rmt.crt | openssl x509 -noout -fingerprint -sha1'):
+# test -f /etc/zypp/credentials.d/SCCcredentials || { curl -sS http://SUSE_RMT_SERVER/tools/rmt-client-setup --output /tmp/rmt-client-setup && sh /tmp/rmt-client-setup https://SUSE_RMT_SERVER/ --fingerprint XX:XX:... --yes; }
+sap_vm_provision_os_registration_script_command: "ENTER_STRING_VALUE_HERE"
+
+# OS Package Repo Direct - Cannot be used in conjunction with OS Package Repository Mirrors
+# sap_vm_provision_os_online_registration_user: "ENTER_STRING_VALUE_HERE"
+# sap_vm_provision_os_online_registration_passcode: "ENTER_STRING_VALUE_HERE"
+
+
+#### Ansible Dictionary for host specifications ####
+# Storage: one /hana filesystem for SAP HANA data, log, shared and installation media, swap file on the root disk.
+sap_vm_provision_cloudstack_vm_host_specifications_dictionary:
+
+  xsmall_30gb:
+
+    hana-p: # Hostname, must be 13 characters or less
+      sap_host_type: hana_primary # hana_primary, hana_secondary, nwas_ascs, nwas_ers, nwas_pas, nwas_aas
+      cloudstack_vm_service_offering: "ENTER_STRING_VALUE_HERE"  # CloudStack Service Offering (String).
+      # cloudstack_vm_ip_address: "ENTER_STRING_VALUE_HERE"  # Optional static IP in the Guest Network (String).
+      # cloudstack_vm_root_disk_size_gb: 50
+
+      sap_storage_setup_sid: "{{ sap_system_hana_db_sid }}"
+
+      # hana_primary, hana_secondary, nwas_abap_ascs, nwas_abap_ers, nwas_abap_pas, nwas_abap_aas, nwas_java_scs, nwas_java_ers
+      sap_storage_setup_host_type:
+        - hana_primary
+
+      storage_definition:
+
+        - name: hana
+          mountpoint: /hana
+          disk_size: 200                 # size in GB, integer
+          filesystem_type: xfs           # default: xfs
+
+        # See SAP Note 1597355 - Swap-space recommendation for Linux
+        - name: swap # hdb
+          swap_path: /swapfile           # use swap file on root disk, instead of creating LVM LV for swap
+          disk_size: 2                   # size in GB, integer
+          filesystem_type: swap          # must be swap filesystem
+
+    hana-s: # Hostname, must be 13 characters or less
+      sap_host_type: hana_secondary # hana_primary, hana_secondary, nwas_ascs, nwas_ers, nwas_pas, nwas_aas
+      cloudstack_vm_service_offering: "ENTER_STRING_VALUE_HERE"  # CloudStack Service Offering (String).
+      # cloudstack_vm_ip_address: "ENTER_STRING_VALUE_HERE"  # Optional static IP in the Guest Network (String).
+      # cloudstack_vm_root_disk_size_gb: 50
+
+      sap_storage_setup_sid: "{{ sap_system_hana_db_sid }}"
+
+      # hana_primary, hana_secondary, nwas_abap_ascs, nwas_abap_ers, nwas_abap_pas, nwas_abap_aas, nwas_java_scs, nwas_java_ers
+      sap_storage_setup_host_type:
+        - hana_secondary
+
+      storage_definition:
+
+        - name: hana
+          mountpoint: /hana
+          disk_size: 200                 # size in GB, integer
+          filesystem_type: xfs           # default: xfs
+
+        # See SAP Note 1597355 - Swap-space recommendation for Linux
+        - name: swap # hdb
+          swap_path: /swapfile           # use swap file on root disk, instead of creating LVM LV for swap
+          disk_size: 2                   # size in GB, integer
+          filesystem_type: swap          # must be swap filesystem

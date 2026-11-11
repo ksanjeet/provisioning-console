@@ -46,9 +46,9 @@
       ansible.builtin.fail:
         msg: |
           The variable 'sap_vm_provision_iac_platform' is undefined or invalid.
-          Available options: aws_ec2_vs, gcp_ce_vm, msazure_vm, ibmcloud_powervs, ibmcloud_vs, ibmpowervm_vm, kubevirt_vm, ovirt_vm, vmware_vm, existing_hosts
+          Available options: aws_ec2_vs, gcp_ce_vm, msazure_vm, ibmcloud_powervs, ibmcloud_vs, ibmpowervm_vm, kubevirt_vm, ovirt_vm, vmware_vm, cloudstack_vm, existing_hosts
       when: sap_vm_provision_iac_platform is not defined or sap_vm_provision_iac_platform not in
-        ['aws_ec2_vs', 'gcp_ce_vm', 'msazure_vm', 'ibmcloud_powervs', 'ibmcloud_vs', 'ibmpowervm_vm', 'kubevirt_vm', 'ovirt_vm', 'vmware_vm', 'existing_hosts']
+        ['aws_ec2_vs', 'gcp_ce_vm', 'msazure_vm', 'ibmcloud_powervs', 'ibmcloud_vs', 'ibmpowervm_vm', 'kubevirt_vm', 'ovirt_vm', 'vmware_vm', 'cloudstack_vm', 'existing_hosts']
 
     - name: Identify variables with placeholder values or empty passwords  # noqa: ignore-errors
       ansible.builtin.set_fact:
@@ -188,6 +188,49 @@
 
 
 #### Begin downloading SAP software installation media to hosts ####
+# Optional: download on the Ansible execution node, for hosts without Internet access (e.g. private cloud Guest Networks).
+# Enabled with 'sap_software_download_on_execution_node: true', files are copied to the SAP HANA primary host afterwards.
+- name: Ansible Play for downloading SAP HANA installation media on the execution node
+  hosts: localhost
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+
+    - name: Block for download on the execution node
+      when: sap_software_download_on_execution_node | d(false) | bool
+      block:
+
+        - name: Ensure the media directory exists on the execution node
+          ansible.builtin.file:
+            path: "{{ sap_software_download_execution_node_directory }}"
+            state: directory
+            mode: "0755"
+
+        # Module instead of Ansible Role: the Role installs OS packages for a Python venv, the execution node
+        # (container or workstation) provides the Python modules requests, urllib3, beautifulsoup4 and lxml for Ansible.
+        - name: Download SAP HANA installation media with SAP S-User on the execution node
+          community.sap_launchpad.software_center_download:
+            suser_id: "{{ sap_id_user }}"
+            suser_password: "{{ sap_id_user_password }}"
+            search_query: "{{ media_item }}"
+            dest: "{{ sap_software_download_execution_node_directory }}"
+            search_alternatives: true
+            deduplicate: first
+          # Architecture of the target SAP HANA host, not of the execution node
+          loop: "{{ sap_software_install_dictionary[sap_software_product]
+            ['softwarecenter_search_list_' ~ (hostvars[groups['hana_primary'][0]].ansible_architecture | d('x86_64'))] }}"
+          loop_control:
+            loop_var: media_item
+          register: sap_playbook_execution_node_download
+          retries: 1
+          until: sap_playbook_execution_node_download is not failed
+          no_log: true
+
+        - name: Show downloaded SAP HANA installation media
+          ansible.builtin.debug:
+            msg: "{{ sap_playbook_execution_node_download.results | map(attribute='msg') | list }}"
+
+
 - name: Ansible Play for downloading SAP HANA installation media
   hosts: hana_primary
   become: true
@@ -214,7 +257,28 @@
         sap_software_download_deduplicate: first
         sap_software_download_files: "{{ sap_software_install_dictionary[sap_software_product]
           ['softwarecenter_search_list_' ~ ansible_architecture] }}"
-      when: sap_playbook_collection_list_output.stdout_lines | select('search', 'community.sap_launchpad')
+      when:
+        - sap_playbook_collection_list_output.stdout_lines | select('search', 'community.sap_launchpad')
+        - not (sap_software_download_on_execution_node | d(false) | bool)
+
+    - name: Ensure the SAP HANA installation media directory exists
+      ansible.builtin.file:
+        path: "{{ sap_install_media_detect_source_directory }}"
+        state: directory
+        mode: "0755"
+      when: sap_software_download_on_execution_node | d(false) | bool
+
+    # Files matching the scenario wildcard list, as downloaded files may be alternatives of the requested files
+    - name: Copy SAP HANA installation media downloaded on the execution node
+      ansible.builtin.copy:
+        src: "{{ media_item }}"
+        dest: "{{ sap_install_media_detect_source_directory }}/"
+        mode: "0644"
+      with_fileglob: "{{ sap_software_install_dictionary[sap_software_product]['software_files_wildcard_list']
+        | map('regex_replace', '^', sap_software_download_execution_node_directory ~ '/') | list }}"
+      loop_control:
+        loop_var: media_item
+      when: sap_software_download_on_execution_node | d(false) | bool
 
 
     - name: Find SAP HANA installation media

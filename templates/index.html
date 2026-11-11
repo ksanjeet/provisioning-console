@@ -98,8 +98,11 @@
             <label><span>Azure resource group</span><input type="text" name="azure_resource_group_name" placeholder="sap-demo-rg"></label>
           </div>
 
-          <div class="field-grid provider-config-fields" data-provider-fields="local_kvm" hidden>
-            <label class="wide-field"><span>Libvirt connection URI</span><input type="text" name="kvm_uri" placeholder="qemu:///system"></label>
+          <div class="field-grid provider-config-fields" data-provider-fields="cloudstack_vm" hidden>
+            <label class="wide-field"><span>CloudStack API URL</span><input type="text" name="cloudstack_api_url" placeholder="http://cloudstack.example.com:8080/client/api"></label>
+            <label><span>CloudStack API key</span><input type="password" name="cloudstack_api_key"></label>
+            <label><span>CloudStack API secret</span><input type="password" name="cloudstack_api_secret"></label>
+            <label><span>CloudStack zone (optional)</span><input type="text" name="cloudstack_zone" placeholder="zone1"></label>
           </div>
 
           <div class="provider-config-form-actions">
@@ -231,6 +234,7 @@
                     <option value="kubevirt_vm" {% if form.get('platform') == 'kubevirt_vm' %}selected{% endif %}>KubeVirt</option>
                     <option value="ovirt_vm" {% if form.get('platform') == 'ovirt_vm' %}selected{% endif %}>oVirt / KVM</option>
                     <option value="vmware_vm" {% if form.get('platform') == 'vmware_vm' %}selected{% endif %}>VMware vSphere</option>
+                    <option value="cloudstack_vm" {% if form.get('platform') == 'cloudstack_vm' %}selected{% endif %}>Apache CloudStack (KVM)</option>
                     <option value="existing_hosts" {% if form.get('platform') == 'existing_hosts' %}selected{% endif %}>Existing hosts</option>
                   </select>
                 </label>
@@ -251,6 +255,11 @@
                   <small>Upload a JSON object keyed by wizard field names to refill the wizard in one step. Matching fields are overwritten; unknown keys are ignored.</small>
                   <span class="resource-item-meta" id="wizard-json-status">No JSON file loaded yet.</span>
                 </label>
+
+                <div class="wide-field">
+                  <button type="button" class="btn btn-secondary" data-save-wizard-json>Save inputs as JSON</button>
+                  <small>Downloads the current wizard inputs (including the YAML override) as a JSON file that can be loaded again. Passwords, secrets, tokens and keys are never saved.</small>
+                </div>
  
                 <label class="wide-field">
                   <span>DNS root domain</span>
@@ -353,6 +362,33 @@
                 <label><span>Subnet name</span><input name="azure_vnet_subnet_name" type="text" value="{{ form.get('azure_vnet_subnet_name', '') }}"></label>
                 <label><span>Azure OS image</span><input name="azure_host_os_image" type="text" value="{{ form.get('azure_host_os_image', '') }}" placeholder="sles-15-6-sap-ha"></label>
                 <label><span>SSH key pair name</span><input name="azure_key_pair_name_ssh_host_public_key" type="text" value="{{ form.get('azure_key_pair_name_ssh_host_public_key', '') }}" placeholder="sap-key"></label>
+              </div>
+
+              <div class="field-grid platform-section" id="cloudstack-fields" style="display:none;">
+                <label><span>CloudStack zone</span><input name="cloudstack_zone" type="text" value="{{ form.get('cloudstack_zone', '') }}" placeholder="zone1"></label>
+                <label><span>Guest network</span><input name="cloudstack_network_name" type="text" value="{{ form.get('cloudstack_network_name', '') }}" placeholder="guest-network"></label>
+                <label><span>Template (OS image)</span><input name="cloudstack_template_name" type="text" value="{{ form.get('cloudstack_template_name', '') }}" placeholder="sles-for-sap-15-sp7"></label>
+                <label><span>Hypervisor (optional)</span>
+                  <select name="cloudstack_hypervisor">
+                    {% for value, label in [('', 'From template'), ('KVM', 'KVM'), ('XenServer', 'XenServer / XCP-ng'), ('VMware', 'VMware')] %}
+                    <option value="{{ value }}" {% if form.get('cloudstack_hypervisor', '') == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label><span>HA fencing method</span>
+                  <select name="cloudstack_ha_fencing_method">
+                    {% for value, label in [('sbd_devices', 'SBD on shared device(s)'), ('sbd_linstor_kvm', 'SBD on LINSTOR (KVM, automatic)'), ('none', 'None / own STONITH')] %}
+                    <option value="{{ value }}" {% if form.get('cloudstack_ha_fencing_method', 'sbd_devices') == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label class="wide-field"><span>SBD device path(s) in the VMs (sbd_devices)</span><input name="cloudstack_ha_sbd_devices" type="text" value="{{ form.get('cloudstack_ha_sbd_devices', '') }}" placeholder="/dev/disk/by-id/scsi-36001405..."></label>
+                <label><span>KVM host SSH user (sbd_linstor_kvm)</span><input name="cloudstack_kvm_host_ssh_user" type="text" value="{{ form.get('cloudstack_kvm_host_ssh_user', '') }}" placeholder="root"></label>
+                <label class="wide-field">
+                  <span>KVM host SSH private key (sbd_linstor_kvm)</span>
+                  <input name="cloudstack_kvm_host_ssh_private_key_file" type="text" value="{{ form.get('cloudstack_kvm_host_ssh_private_key_file', '') }}" placeholder="/mnt/ssh/id_rsa">
+                  <small>Primary storage is selected by the disk offering's storage tags (e.g. NFS, CLVM_NG, Ceph RBD, LINSTOR). 'SBD on LINSTOR' creates the fencing disk on LINSTOR and attaches it to the KVM domains with virsh over SSH (root or passwordless sudo). Host names, service offerings and static IPs come from the selected host plan or the YAML override.</small>
+                </label>
               </div>
 
               <div class="field-grid common-credentials">
@@ -466,6 +502,7 @@
             <div class="form-actions">
               <button type="button" class="btn btn-secondary" id="prev-step">Back</button>
               <button type="button" class="btn btn-primary" id="next-step">Next</button>
+              <button type="button" class="btn btn-secondary" data-save-wizard-json>Save inputs as JSON</button>
               <button type="submit" class="btn btn-success" id="submit-step" style="display:none;">Run provisioning</button>
             </div>
           </form>
@@ -511,13 +548,13 @@
         aws_ec2_vs: 'AWS EC2',
         gcp_ce_vm: 'GCP Compute Engine',
         msazure_vm: 'Azure VM',
-        local_kvm: 'Local KVM',
         ibmcloud_vs: 'IBM Cloud Virtual Server',
         ibmcloud_powervs: 'IBM Cloud PowerVS',
         ibmpowervm_vm: 'IBM PowerVM',
         kubevirt_vm: 'KubeVirt',
         ovirt_vm: 'oVirt/KVM',
         vmware_vm: 'VMware vSphere',
+        cloudstack_vm: 'Apache CloudStack',
         existing_hosts: 'Existing hosts'
       };
       const providerConfigMetadata = {
@@ -536,10 +573,10 @@
           description: 'Save only the minimum fields needed to reach Azure and list virtual machines in one resource group.',
           required: ['azure_subscription_id', 'azure_tenant_id', 'azure_client_id', 'azure_client_secret', 'azure_resource_group_name']
         },
-        local_kvm: {
-          title: 'Configure local KVM connectivity',
-          description: 'Set the libvirt URI used for local VM inventory checks.',
-          required: []
+        cloudstack_vm: {
+          title: 'Configure Apache CloudStack connectivity',
+          description: 'Save the API endpoint and key pair used to provision and list CloudStack instances.',
+          required: ['cloudstack_api_url', 'cloudstack_api_key', 'cloudstack_api_secret']
         }
       };
 
@@ -581,6 +618,85 @@
         const eventName = element.tagName === 'SELECT' ? 'change' : 'input';
         element.dispatchEvent(new Event(eventName, { bubbles: true }));
         return true;
+      }
+
+      // Field names that must never be written to a saved wizard JSON file (shared files must not contain credentials).
+      const WIZARD_SECRET_NAME_PATTERN = /(password|passwd|secret|token|api_key|apikey|access_key|private_key_content|credentials_json)/i;
+      const WIZARD_PLACEHOLDER = 'ENTER_STRING_VALUE_HERE';
+
+      function isWizardSecretField(element) {
+        // Checkboxes (e.g. use_single_master_password) only hold true/false, never a secret value
+        if (element.type === 'checkbox' || element.type === 'radio') {
+          return false;
+        }
+        return element.type === 'password' || WIZARD_SECRET_NAME_PATTERN.test(element.name || '');
+      }
+
+      // Replace values of secret-like keys in the YAML override ("key: value" lines) with a placeholder.
+      function redactYamlOverrideSecrets(text) {
+        let redacted = 0;
+        const lines = String(text || '').split('\n').map((line) => {
+          const match = line.match(/^(\s*-?\s*)([A-Za-z0-9_.-]+)(\s*:\s*)(.+)$/);
+          if (match && WIZARD_SECRET_NAME_PATTERN.test(match[2]) && !/^[>|]/.test(match[4].trim()) && match[4].trim() !== '') {
+            redacted += 1;
+            return `${match[1]}${match[2]}${match[3]}"${WIZARD_PLACEHOLDER}"`;
+          }
+          return line;
+        });
+        return { text: lines.join('\n'), redacted };
+      }
+
+      function collectWizardJsonInput() {
+        const form = {};
+        const skipped = [];
+        let redacted = 0;
+        Array.from(wizardForm.elements).forEach((element) => {
+          if (!element.name || element.disabled || element.type === 'file' || element.type === 'submit' || element.type === 'button') {
+            return;
+          }
+          if (isWizardSecretField(element)) {
+            if (element.value) {
+              skipped.push(element.name);
+            }
+            return;
+          }
+          if (element.type === 'checkbox') {
+            form[element.name] = element.checked;
+          } else if (element.type === 'radio') {
+            if (element.checked) {
+              form[element.name] = element.value;
+            }
+          } else if (element.name === 'yaml_override') {
+            const result = redactYamlOverrideSecrets(element.value);
+            form[element.name] = result.text;
+            redacted += result.redacted;
+          } else {
+            form[element.name] = element.value;
+          }
+        });
+        return { form, skipped, redacted };
+      }
+
+      function saveWizardJsonFile() {
+        const { form, skipped, redacted } = collectWizardJsonInput();
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        const fileName = `${form.scenario || 'wizard'}_${form.platform || 'inputs'}_${stamp}.wizard.json`;
+        const blob = new Blob([`${JSON.stringify(form, null, 2)}\n`], { type: 'application/json' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+        const notes = [];
+        if (skipped.length) {
+          notes.push(`not saved: ${skipped.join(', ')}`);
+        }
+        if (redacted) {
+          notes.push(`${redacted} secret value(s) in the YAML override replaced by ${WIZARD_PLACEHOLDER}`);
+        }
+        setWizardJsonStatus(`Saved ${fileName}${notes.length ? ` (${notes.join('; ')})` : ''}.`);
       }
 
       function applyWizardJsonInput(rawInput) {
@@ -992,6 +1108,8 @@
           document.getElementById('gcp-fields').style.display = 'grid';
         } else if (platform === 'msazure_vm') {
           document.getElementById('azure-fields').style.display = 'grid';
+        } else if (platform === 'cloudstack_vm') {
+          document.getElementById('cloudstack-fields').style.display = 'grid';
         }
       }
 
@@ -1142,6 +1260,9 @@
       document.querySelector('[name="ha_secondary_hostname"]').addEventListener('input', updateReview);
       document.querySelector('[name="ha_vip_hana_primary"]').addEventListener('input', updateReview);
       wizardJsonFile.addEventListener('change', loadWizardJsonFile);
+      document.querySelectorAll('[data-save-wizard-json]').forEach((button) => {
+        button.addEventListener('click', saveWizardJsonFile);
+      });
 
       hostPlanSelect.dataset.currentValue = {{ form.get('host_plan', '')|tojson }};
       refreshHostPlanOptions();

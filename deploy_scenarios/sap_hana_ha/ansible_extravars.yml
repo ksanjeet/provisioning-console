@@ -5,7 +5,7 @@
 sap_vm_provision_iac_type: "ENTER_STRING_VALUE_HERE"
 
 # Infrastructure platform for provisioning (String).
-# Options: aws_ec2_vs, gcp_ce_vm, ibmcloud_vs, ibmcloud_powervs, msazure_vm, ibmpowervm_vm, kubevirt_vm, ovirt_vm, vmware_vm
+# Options: aws_ec2_vs, gcp_ce_vm, ibmcloud_vs, ibmcloud_powervs, msazure_vm, ibmpowervm_vm, kubevirt_vm, ovirt_vm, vmware_vm, cloudstack_vm
 sap_vm_provision_iac_platform: "ENTER_STRING_VALUE_HERE"
 
 # Name of the host specification plan to use (String).
@@ -28,6 +28,11 @@ sap_software_product: "ENTER_STRING_VALUE_HERE"
 # SAP ONE Support Launchpad credentials
 sap_id_user: "ENTER_STRING_VALUE_HERE"  # Your SAP S-user ID (String).
 sap_id_user_password: 'ENTER_STRING_VALUE_HERE'  # Your SAP S-user password (String).
+
+# Download SAP installation media on the Ansible execution node and copy it to the SAP HANA host,
+# for SAP hosts without Internet access (Boolean, String).
+sap_software_download_on_execution_node: false
+sap_software_download_execution_node_directory: "/var/tmp/sap_media"
 
 # Directory with SAP installation media (e.g. /software) (String)
 sap_install_media_detect_source_directory: "ENTER_STRING_VALUE_HERE"
@@ -95,6 +100,7 @@ sap_ha_install_hana_hsr_db_system_password: "{{ sap_hana_install_master_password
 # IBM PowerVM:          the VIP must be within the VLAN Subnet range
 # OVirt KVM:            the VIP must be within the VLAN Subnet range
 # KubeVirt:             the VIP must be within the VLAN Subnet range
+# Apache CloudStack:    the VIP must be an unused IP within the Guest Network range (e.g. 192.0.2.10/24), it is reserved as secondary IP of the primary host
 sap_vm_provision_ha_vip_hana_primary: "ENTER_STRING_VALUE_HERE"
 
 # Variables for Ansible Role sap_ha_pacemaker_cluster

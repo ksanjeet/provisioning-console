@@ -2,9 +2,11 @@
 """Provisioning Console web UI for the SAP automation project."""
 
 import configparser
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -18,6 +20,7 @@ from urllib import request as urllib_request
 from urllib.parse import quote
 
 import yaml
+import cloudstack_support
 from flask import Flask, abort, jsonify, redirect, render_template, request, url_for
 from container.apply_collection_patches import (
     HSR_COMMAND_ENVIRONMENT,
@@ -53,13 +56,14 @@ ALLOWED_PLATFORMS = [
     "kubevirt_vm",
     "ovirt_vm",
     "vmware_vm",
+    "cloudstack_vm",
     "existing_hosts",
 ]
 CONFIGURABLE_PROVIDERS = [
     "aws_ec2_vs",
     "gcp_ce_vm",
     "msazure_vm",
-    "local_kvm",
+    "cloudstack_vm",
 ]
 
 JOB_STATE = {}
@@ -129,6 +133,7 @@ PLATFORM_LABELS = {
     "kubevirt_vm": "KubeVirt",
     "ovirt_vm": "oVirt/KVM",
     "vmware_vm": "VMware vSphere",
+    "cloudstack_vm": "Apache CloudStack",
     "existing_hosts": "Existing hosts",
 }
 DEFAULT_SSH_HOST_ARGS = (
@@ -145,24 +150,64 @@ DASHBOARD_PROVIDERS = [
     {"key": "aws_ec2_vs", "label": "AWS", "accent": "aws"},
     {"key": "gcp_ce_vm", "label": "GCP", "accent": "gcp"},
     {"key": "msazure_vm", "label": "Azure", "accent": "azure"},
-    {"key": "local_kvm", "label": "Local KVM", "accent": "kvm"},
+    {"key": "cloudstack_vm", "label": "CloudStack", "accent": "cloudstack"},
 ]
 ACTIVE_INSTANCE_STATES = ["pending", "running", "stopping", "stopped", "shutting-down"]
 PROVIDER_PROFILE_FIELDS = {
     "aws_ec2_vs": ["aws_access_key", "aws_secret_access_key", "aws_session_token", "aws_region"],
     "gcp_ce_vm": ["gcp_credentials_json", "gcp_project"],
     "msazure_vm": ["azure_subscription_id", "azure_tenant_id", "azure_client_id", "azure_client_secret", "azure_resource_group_name"],
-    "local_kvm": ["kvm_uri"],
+    "cloudstack_vm": cloudstack_support.PROFILE_FIELDS,
 }
 PROVIDER_PROFILE_REQUIRED_FIELDS = {
     "aws_ec2_vs": ["aws_access_key", "aws_secret_access_key", "aws_region"],
     "gcp_ce_vm": ["gcp_credentials_json", "gcp_project"],
     "msazure_vm": ["azure_subscription_id", "azure_tenant_id", "azure_client_id", "azure_client_secret", "azure_resource_group_name"],
-    "local_kvm": [],
+    "cloudstack_vm": cloudstack_support.PROFILE_REQUIRED_FIELDS,
 }
 
+def _load_or_create_secret_key():
+    """FLASK_SECRET_KEY if set, otherwise a random key generated once and kept in the state directory."""
+    configured = os.environ.get("FLASK_SECRET_KEY", "")
+    if configured and configured not in ("change-me", "sap-ui-dev-secret"):
+        return configured
+    key_file = STATE_DIR / ".flask_secret_key"
+    try:
+        if key_file.exists():
+            existing = key_file.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        generated = secrets.token_hex(32)
+        key_file.write_text(generated, encoding="utf-8")
+        os.chmod(key_file, 0o600)
+        return generated
+    except OSError:
+        return secrets.token_hex(32)
+
+
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "sap-ui-dev-secret")
+app.config["SECRET_KEY"] = _load_or_create_secret_key()
+
+# Optional HTTP basic authentication, recommended when the console is reachable from other machines:
+# set SAP_WIZARD_AUTH_USER and SAP_WIZARD_AUTH_PASSWORD (e.g. in .env for Docker Compose).
+AUTH_USER = os.environ.get("SAP_WIZARD_AUTH_USER", "")
+AUTH_PASSWORD = os.environ.get("SAP_WIZARD_AUTH_PASSWORD", "")
+
+
+@app.before_request
+def _require_basic_auth():
+    if not (AUTH_USER and AUTH_PASSWORD):
+        return None
+    auth = request.authorization
+    if (
+        auth is not None
+        and hmac.compare_digest(auth.username or "", AUTH_USER)
+        and hmac.compare_digest(auth.password or "", AUTH_PASSWORD)
+    ):
+        return None
+    return app.response_class(
+        "Authentication required.", 401, {"WWW-Authenticate": 'Basic realm="SAP provisioning console"'}
+    )
 
 
 def discover_scenarios():
@@ -733,13 +778,14 @@ def save_credentials_for_platform(config):
             "azure_vnet_name",
             "azure_vnet_subnet_name",
         ],
+        "cloudstack_vm": cloudstack_support.PROFILE_FIELDS + cloudstack_support.DEPLOYMENT_FIELDS,
     }
     for key in wizard_profile_fields.get(platform, []):
         value = config.get(key)
         if value:
             platform_map[key] = value
 
-    if platform in {"aws_ec2_vs", "gcp_ce_vm", "msazure_vm"}:
+    if platform in {"aws_ec2_vs", "gcp_ce_vm", "msazure_vm", "cloudstack_vm"}:
         dns_value = config.get("dns_root_domain")
         if dns_value:
             platform_map["dns_root_domain"] = dns_value
@@ -768,9 +814,6 @@ def save_provider_profile(platform, payload):
     missing = [key for key in required_fields if not existing.get(key)]
     if missing:
         raise ValueError("Missing required field(s): {}.".format(", ".join(missing)))
-
-    if platform == "local_kvm" and not existing.get("kvm_uri"):
-        existing["kvm_uri"] = "qemu:///system"
 
     _persist_platform_profile(platform, existing)
     return existing
@@ -894,32 +937,6 @@ def _extract_azure_resource_group(resource_id):
             return parts[index + 1]
     return None
 
-
-def _parse_kvm_domain_listing(output):
-    resources = []
-    for line in output.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("Id") or stripped.startswith("-"):
-            continue
-        parts = re.split(r"\s{2,}", stripped)
-        if len(parts) < 3:
-            continue
-        domain_id, name, state = parts[0], parts[1], parts[2]
-        resources.append(
-            _build_dashboard_resource(
-                "local_kvm",
-                "kvm",
-                name,
-                name,
-                state,
-                f"Domain {name} on qemu:///system.",
-                metadata=[
-                    f"Domain ID: {domain_id}",
-                    "Hypervisor: qemu:///system",
-                ],
-            )
-        )
-    return resources
 
 
 def inspect_aws_dashboard(saved_credentials):
@@ -1209,55 +1226,6 @@ def inspect_azure_dashboard(saved_credentials):
     )
 
 
-def inspect_local_kvm_dashboard():
-    provider_key = "local_kvm"
-    virsh_binary = shutil.which("virsh")
-    if not virsh_binary:
-        return _build_provider_status(
-            provider_key,
-            "kvm",
-            "degraded",
-            "virsh is not installed on this host.",
-            ["Install libvirt clients or run the container with libvirt access enabled."],
-        )
-
-    saved_profile = discover_saved_credentials().get(provider_key, {})
-    connection_uri = saved_profile.get("kvm_uri") or os.environ.get("SAP_WIZARD_KVM_URI", "qemu:///system")
-    try:
-        result = subprocess.run(
-            [virsh_binary, "--connect", connection_uri, "list", "--all"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-    except Exception as exc:
-        return _build_provider_status(provider_key, "kvm", "error", "Local KVM connectivity failed.", [str(exc)])
-
-    if result.returncode != 0:
-        return _build_provider_status(
-            provider_key,
-            "kvm",
-            "error",
-            "Local KVM connectivity failed.",
-            [result.stdout.strip() or "virsh returned a non-zero status."],
-        )
-
-    resources = _parse_kvm_domain_listing(result.stdout)
-    socket_path = "/var/run/libvirt/libvirt-sock"
-    details = [f"Connection URI: {connection_uri}"]
-    if Path(socket_path).exists():
-        details.append(f"libvirt socket: {socket_path}")
-    return _build_provider_status(
-        provider_key,
-        "kvm",
-        "connected",
-        f"Connected to {connection_uri}. {len(resources)} local VM domain(s) visible.",
-        details,
-        sorted(resources, key=lambda item: item["name"].lower()),
-    )
-
 
 def inspect_azure_dashboard_scoped(saved_credentials):
     provider_key = "msazure_vm"
@@ -1477,7 +1445,7 @@ def build_provider_dashboard(force_refresh=False):
         inspect_aws_dashboard(saved_credentials),
         inspect_gcp_dashboard(saved_credentials),
         inspect_azure_dashboard_scoped_v2(saved_credentials),
-        inspect_local_kvm_dashboard(),
+        cloudstack_support.inspect_dashboard(_build_provider_status, _build_dashboard_resource, saved_credentials),
     ]
     all_resources = []
     for provider in providers:
@@ -1576,6 +1544,7 @@ def delete_dashboard_resource(provider, payload):
         "aws_ec2_vs": delete_dashboard_aws_resource,
         "gcp_ce_vm": delete_dashboard_gcp_resource,
         "msazure_vm": delete_dashboard_azure_resource,
+        "cloudstack_vm": cloudstack_support.delete_dashboard_resource,
     }
     handler = delete_handlers.get(provider)
     if handler is None:
@@ -1787,6 +1756,21 @@ def validate_config(data):
         ]:
             if not config.get(key):
                 errors.append(f"Azure {key.replace('azure_', '').replace('_', ' ')} is required to provision on Azure.")
+    elif platform == "cloudstack_vm":
+        if config["iac_type"] != "ansible":
+            errors.append("Apache CloudStack provisioning is only available with 'Provision hosts with Ansible'.")
+        if not cloudstack_support.resolve_credentials(config):
+            errors.append("Apache CloudStack API URL, key and secret are required (provider profile, CLOUDSTACK_* environment or cloudstack.ini).")
+        for key, label in cloudstack_support.REQUIRED_DEPLOYMENT_FIELDS.items():
+            if not config.get(key):
+                errors.append(f"{label} is required to provision on Apache CloudStack.")
+        fencing_method = config.get("cloudstack_ha_fencing_method") or "sbd_devices"
+        if fencing_method not in cloudstack_support.FENCING_METHODS:
+            errors.append("Unsupported CloudStack HA fencing method.")
+        elif is_ha_deployment and fencing_method == "sbd_devices" and not cloudstack_support.parse_sbd_devices(config.get("cloudstack_ha_sbd_devices")):
+            errors.append("SBD device path(s) visible in both HA VMs are required for fencing method 'sbd_devices'.")
+        elif is_ha_deployment and fencing_method == "sbd_linstor_kvm" and not config.get("cloudstack_kvm_host_ssh_user"):
+            errors.append("KVM host SSH user is required for fencing method 'sbd_linstor_kvm'.")
 
     if config["iac_type"] != "existing_hosts" and config.get("scenario") and config.get("platform") in ALLOWED_PLATFORMS:
         available_host_plans = get_scenario_host_plans(config["scenario"], config["platform"])
@@ -2062,9 +2046,23 @@ def run_aws_preflight_check(config):
     return results
 
 
+def run_cloudstack_preflight_check(config):
+    # Use the generated variables (scenario file + YAML override + wizard HA host names), as passed to the playbook
+    selected_hosts = {}
+    if config.get("scenario") and config.get("host_plan"):
+        try:
+            document = build_generated_document(config)
+        except Exception:  # pragma: no cover - fall back to the scenario file
+            document = {get_host_specification_variable_name("cloudstack_vm"): get_scenario_host_specifications(config["scenario"], "cloudstack_vm")}
+        host_specs = document.get(get_host_specification_variable_name("cloudstack_vm")) or {}
+        selected_hosts = host_specs.get(config["host_plan"], {}) if isinstance(host_specs, dict) else {}
+    return cloudstack_support.run_preflight_check({**config, "_cloudstack_selected_hosts": selected_hosts}, _build_preflight_check)
+
+
 def run_platform_preflight_check(config):
     preflight_handlers = {
         "aws_ec2_vs": run_aws_preflight_check,
+        "cloudstack_vm": run_cloudstack_preflight_check,
     }
     handler = preflight_handlers.get(config.get("platform"))
     if handler is None:
@@ -2080,15 +2078,16 @@ def build_generated_document(config):
     if not platform_template.exists():
         platform_template = None
 
-    base_document = {}
+    # Precedence (lowest to highest): scenario extravars < platform extravars < wizard values and YAML override
+    output = {}
     if template_path.exists():
-        base_document = _load_yaml_document(template_path)
+        output = _load_yaml_document(template_path)
     if platform_template is not None:
-        base_document = {**base_document, **_load_yaml_document(platform_template)}
+        output = {**output, **_load_yaml_document(platform_template)}
 
-    output = update_template_with_overrides(template_path, sanitize_overrides(config))
-    if platform_template is not None:
-        output = {**base_document, **output}
+    for key, value in sanitize_overrides(config).items():
+        if value is not None:
+            output[key] = value
     return apply_platform_configuration_overrides(output, config)
 
 
@@ -2189,6 +2188,28 @@ def sanitize_overrides(config):
             "sap_vm_provision_msazure_key_pair_name_ssh_host_public_key": config.get("azure_key_pair_name_ssh_host_public_key"),
             "sap_vm_provision_dns_root_domain": config.get("dns_root_domain"),
         })
+    elif platform == "cloudstack_vm":
+        credentials = cloudstack_support.resolve_credentials(config)
+        template_name = config.get("cloudstack_template_name")
+        overrides.update({
+            "sap_vm_provision_cloudstack_api_url": credentials.get("cloudstack_api_url"),
+            "sap_vm_provision_cloudstack_api_key": credentials.get("cloudstack_api_key"),
+            "sap_vm_provision_cloudstack_api_secret": credentials.get("cloudstack_api_secret"),
+            "sap_vm_provision_cloudstack_zone": config.get("cloudstack_zone"),
+            "sap_vm_provision_cloudstack_network_name": config.get("cloudstack_network_name"),
+            "sap_vm_provision_cloudstack_vm_host_os_image": cloudstack_support.OS_IMAGE_KEY if template_name else None,
+            "sap_vm_provision_cloudstack_vm_host_os_image_dictionary": (
+                {cloudstack_support.OS_IMAGE_KEY: template_name} if template_name else None
+            ),
+            "sap_vm_provision_cloudstack_vm_hypervisor": config.get("cloudstack_hypervisor"),
+            "sap_vm_provision_cloudstack_ha_fencing_method": config.get("cloudstack_ha_fencing_method"),
+            "sap_vm_provision_cloudstack_ha_sbd_devices": cloudstack_support.parse_sbd_devices(config.get("cloudstack_ha_sbd_devices")) or None,
+            "sap_vm_provision_cloudstack_kvm_host_ssh_user": config.get("cloudstack_kvm_host_ssh_user"),
+            "sap_vm_provision_cloudstack_kvm_host_ssh_private_key_file_path": config.get("cloudstack_kvm_host_ssh_private_key_file"),
+            # CloudStack Guest Networks often have no Internet access: download SAP media in the console, then copy
+            "sap_software_download_execution_node_directory": str(STATE_DIR / "sap_media"),
+            "sap_vm_provision_dns_root_domain": config.get("dns_root_domain"),
+        })
 
     if config.get("ha_primary_hostname"):
         overrides["sap_vm_provision_ha_primary_hostname"] = config.get("ha_primary_hostname")
@@ -2240,10 +2261,38 @@ def apply_aws_instance_type_override(document, config):
     return document
 
 
+def apply_cloudstack_ha_host_override(document, config):
+    """Apply the HA host names and static IPs from the wizard to the selected CloudStack host plan."""
+    host_spec_var = get_host_specification_variable_name("cloudstack_vm")
+    host_specs = document.get(host_spec_var)
+    selected_plan = config.get("host_plan")
+    if not isinstance(host_specs, dict) or not isinstance(host_specs.get(selected_plan), dict):
+        return document
+
+    selected_hosts = host_specs[selected_plan]
+    renamed = {}
+    for hostname, host_config in selected_hosts.items():
+        new_name, new_ip = hostname, None
+        if isinstance(host_config, dict):
+            host_type = host_config.get("sap_host_type")
+            if host_type == "hana_primary":
+                new_name = config.get("ha_primary_hostname") or hostname
+                new_ip = config.get("ha_primary_ip")
+            elif host_type == "hana_secondary":
+                new_name = config.get("ha_secondary_hostname") or hostname
+                new_ip = config.get("ha_secondary_ip")
+            if new_ip:
+                host_config = {**host_config, "cloudstack_vm_ip_address": new_ip}
+        renamed[new_name] = host_config
+    host_specs[selected_plan] = renamed
+    return document
+
+
 def apply_platform_configuration_overrides(document, config):
     platform = config.get("platform")
     override_handlers = {
         "aws_ec2_vs": apply_aws_instance_type_override,
+        "cloudstack_vm": apply_cloudstack_ha_host_override,
     }
     handler = override_handlers.get(platform)
     if handler is None:
@@ -2504,10 +2553,33 @@ def terminate_job_aws_resources(job_state):
     }
 
 
+def _load_cloudstack_job_vars(job_state):
+    generated_vars_path = job_state.get("generated_file")
+    job_vars = load_generated_vars(generated_vars_path) if generated_vars_path else {}
+    if job_vars.get("sap_vm_provision_iac_platform") != "cloudstack_vm":
+        return None
+    return job_vars
+
+
+def list_job_cloudstack_resources(job_state):
+    job_vars = _load_cloudstack_job_vars(job_state)
+    if job_vars is None:
+        return {"platform": None, "instances": [], "volumes": [], "message": "No CloudStack generated vars file recorded for this job."}
+    return cloudstack_support.list_job_resources(job_vars, PLATFORM_LABELS["cloudstack_vm"])
+
+
+def terminate_job_cloudstack_resources(job_state):
+    job_vars = _load_cloudstack_job_vars(job_state)
+    if job_vars is None:
+        return {"terminated_instances": [], "deleted_volumes": [], "message": "No CloudStack generated vars file recorded for this job."}
+    return cloudstack_support.terminate_job_resources(job_vars, PLATFORM_LABELS["cloudstack_vm"])
+
+
 def list_job_resources(job_state):
     platform = get_job_platform(job_state)
     resource_handlers = {
         "aws_ec2_vs": list_job_aws_resources,
+        "cloudstack_vm": list_job_cloudstack_resources,
     }
     handler = resource_handlers.get(platform)
     if handler is None:
@@ -2526,6 +2598,7 @@ def terminate_job_resources_for_platform(job_state):
     platform = get_job_platform(job_state)
     terminate_handlers = {
         "aws_ec2_vs": terminate_job_aws_resources,
+        "cloudstack_vm": terminate_job_cloudstack_resources,
     }
     handler = terminate_handlers.get(platform)
     if handler is None:
@@ -2781,4 +2854,4 @@ def terminate_job_resources(job_id):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host=os.environ.get("SAP_WIZARD_BIND", "0.0.0.0"), port=int(os.environ.get("SAP_WIZARD_PORT", "5000")), debug=False)

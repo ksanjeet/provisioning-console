@@ -15,9 +15,11 @@ collections:
   - name: community.sap_launchpad
     type: galaxy
     version: 1.2.1
-  - name: community.sap_infrastructure
-    type: galaxy
-    version: 1.1.3
+  # Collection with the Apache CloudStack platform 'cloudstack_vm' (not yet in a released version).
+  # Replace with the upstream galaxy release once merged; pin 'version' to a tag or commit for reproducibility.
+  - name: https://github.com/ksanjeet/community.sap_infrastructure.git
+    type: git
+    version: feature/cloudstack_vm
 #  - name: community.sap_operations
 #    type: galaxy
 #    version: 0.9.1
@@ -51,6 +53,10 @@ collections:
   - name: vmware.vmware_rest
     type: galaxy
     version: 4.5.0
+  # Apache CloudStack (requires Python libraries 'cs' and 'sshpubkeys')
+  - name: ngine_io.cloudstack
+    type: galaxy
+    version: 3.3.0
   - name: cloud.common
     type: galaxy
     version: 4.0.0
