@@ -867,3 +867,8 @@ input:focus, select:focus {
     display: grid;
   }
 }
+
+.ssh-config {
+  max-height: 360px;
+  white-space: pre;
+}

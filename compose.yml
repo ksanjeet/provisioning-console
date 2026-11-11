@@ -16,6 +16,8 @@ services:
       SAP_WIZARD_AUTH_USER: "${SAP_WIZARD_AUTH_USER:-}"
       SAP_WIZARD_AUTH_PASSWORD: "${SAP_WIZARD_AUTH_PASSWORD:-}"
       SAP_WIZARD_STATE_DIR: /var/lib/sap-wizard
+      # Host path of the mounted SSH directory, shown in the SSH connection details of jobs
+      SAP_SSH_DIR_HOST: "${SAP_SSH_DIR:-./ssh}"
       PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
     volumes:
       # State: saved provider profiles (credentials, plaintext), generated variables and job logs. Keep it private.

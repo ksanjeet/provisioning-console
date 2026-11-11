@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 import yaml
 import cloudstack_support
+import connection_info
 from flask import Flask, abort, jsonify, redirect, render_template, request, url_for
 from container.apply_collection_patches import (
     HSR_COMMAND_ENVIRONMENT,
@@ -2553,6 +2554,66 @@ def terminate_job_aws_resources(job_state):
     }
 
 
+def list_job_azure_resources(job_state):
+    generated_vars_path = job_state.get("generated_file")
+    job_vars = load_generated_vars(generated_vars_path) if generated_vars_path else {}
+    if job_vars.get("sap_vm_provision_iac_platform") != "msazure_vm":
+        return {"platform": None, "instances": [], "volumes": [], "message": "No Azure generated vars file recorded for this job."}
+    try:
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.mgmt.network import NetworkManagementClient
+    except ImportError as exc:
+        raise RuntimeError("The Azure SDK is not installed in the application environment.") from exc
+
+    hostnames = [host["name"] for host in connection_info._planned_hosts(job_vars)]
+    resource_group = job_vars.get("sap_vm_provision_msazure_resource_group_name")
+    subscription = job_vars.get("sap_vm_provision_msazure_subscription_id")
+    credential = ClientSecretCredential(
+        tenant_id=job_vars.get("sap_vm_provision_msazure_tenant_id"),
+        client_id=job_vars.get("sap_vm_provision_msazure_app_client_id"),
+        client_secret=job_vars.get("sap_vm_provision_msazure_app_client_secret"),
+    )
+    compute = ComputeManagementClient(credential, subscription)
+    network = NetworkManagementClient(credential, subscription)
+    instances, volumes = [], []
+    for name in hostnames:
+        try:
+            vm = compute.virtual_machines.get(resource_group, name, expand="instanceView")
+        except Exception:
+            continue
+        private_ip = None
+        for nic_ref in vm.network_profile.network_interfaces or []:
+            nic = network.network_interfaces.get(resource_group, nic_ref.id.split("/")[-1])
+            ips = [cfg.private_ip_address for cfg in nic.ip_configurations or [] if cfg.private_ip_address]
+            private_ip = private_ip or (ips[0] if ips else None)
+        statuses = [status.code for status in (vm.instance_view.statuses if vm.instance_view else []) or []]
+        state = next((code.split("/", 1)[1] for code in statuses if code.startswith("PowerState/")), "unknown")
+        instances.append({"name": name, "instance_id": vm.id, "state": state, "private_ip": private_ip,
+                          "size": vm.hardware_profile.vm_size if vm.hardware_profile else None})
+        for disk in vm.storage_profile.data_disks or []:
+            volumes.append({"volume_id": disk.managed_disk.id if disk.managed_disk else disk.name, "name": disk.name,
+                            "device_name": f"LUN {disk.lun}", "size_gib": disk.disk_size_gb,
+                            "attached_instance_name": name})
+    return {
+        "platform": "msazure_vm",
+        "platform_label": PLATFORM_LABELS.get("msazure_vm", "Azure VM"),
+        "instances": instances,
+        "volumes": volumes,
+        "message": f"Found {len(instances)} instance(s) for this job.",
+    }
+
+
+def build_job_connection_info(job_state):
+    generated_vars_path = job_state.get("generated_file")
+    job_vars = load_generated_vars(generated_vars_path) if generated_vars_path else {}
+    try:
+        instances = list_job_resources(job_state).get("instances", [])
+    except Exception:
+        instances = []
+    return connection_info.build_connection_info(job_vars, instances)
+
+
 def _load_cloudstack_job_vars(job_state):
     generated_vars_path = job_state.get("generated_file")
     job_vars = load_generated_vars(generated_vars_path) if generated_vars_path else {}
@@ -2579,6 +2640,7 @@ def list_job_resources(job_state):
     platform = get_job_platform(job_state)
     resource_handlers = {
         "aws_ec2_vs": list_job_aws_resources,
+        "msazure_vm": list_job_azure_resources,
         "cloudstack_vm": list_job_cloudstack_resources,
     }
     handler = resource_handlers.get(platform)
@@ -2838,6 +2900,26 @@ def job_resources(job_id):
     except Exception as exc:
         return jsonify({"status": "error", "message": f"Unable to load job resources: {exc}"}), 500
     return jsonify({"status": "ok", **resources})
+
+
+@app.route("/api/job/<job_id>/connection")
+def job_connection(job_id):
+    state = load_job_state(job_id)
+    if not state:
+        return jsonify({"status": "missing", "message": "Job not found."}), 404
+    return jsonify({"status": "ok", **build_job_connection_info(state)})
+
+
+@app.route("/api/job/<job_id>/ssh_config")
+def job_ssh_config(job_id):
+    state = load_job_state(job_id)
+    if not state:
+        abort(404)
+    info = build_job_connection_info(state)
+    return app.response_class(
+        info["ssh_config"], mimetype="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="ssh_config_{job_id[:8]}.conf"'},
+    )
 
 
 @app.route("/api/job/<job_id>/terminate", methods=["POST"])

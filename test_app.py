@@ -480,5 +480,61 @@ class ConsoleSecurityTests(unittest.TestCase):
                 self.assertEqual(console._load_or_create_secret_key(), "configured-key")
 
 
+class ConnectionInfoTests(unittest.TestCase):
+    def test_direct_access_without_bastion(self):
+        job_vars = {
+            "sap_vm_provision_iac_platform": "cloudstack_vm",
+            "sap_vm_provision_host_specification_plan": "plan1",
+            "sap_vm_provision_cloudstack_vm_host_specifications_dictionary": {"plan1": {
+                "hanahost1": {"sap_host_type": "hana_primary", "cloudstack_vm_ip_address": "192.0.2.16"},
+                "hanahost2": {"sap_host_type": "hana_secondary"}}},
+            "sap_vm_provision_ssh_host_private_key_file_path": "/mnt/ssh/vm_key",
+            "sap_vm_provision_bastion_execution": False,
+        }
+        with patch.dict(console.os.environ, {"SAP_SSH_DIR_HOST": "/home/user/.ssh"}):
+            info = console.connection_info.build_connection_info(
+                job_vars, [{"name": "hanahost2", "private_ip": "192.0.2.17", "state": "running"}])
+        self.assertIn("Host hanahost1\n    HostName 192.0.2.16\n    User root\n    IdentityFile /home/user/.ssh/vm_key", info["ssh_config"])
+        self.assertIn("HostName 192.0.2.17", info["ssh_config"])
+        self.assertNotIn("ProxyJump", info["ssh_config"])
+        self.assertEqual([c["command"] for c in info["commands"]], ["ssh hanahost1", "ssh hanahost2"])
+
+    def test_bastion_uses_proxyjump_and_unknown_ip_placeholder(self):
+        job_vars = {
+            "sap_vm_provision_iac_platform": "msazure_vm",
+            "sap_vm_provision_host_specification_plan": "plan1",
+            "sap_vm_provision_msazure_vm_host_specifications_dictionary": {"plan1": {
+                "hanaaz1": {"sap_host_type": "hana_primary"}, "hanaaz2": {"sap_host_type": "hana_secondary"}}},
+            "sap_vm_provision_ssh_host_private_key_file_path": "/mnt/ssh/azure_key",
+            "sap_vm_provision_bastion_execution": True,
+            "sap_vm_provision_bastion_public_ip": "198.51.100.7",
+            "sap_vm_provision_bastion_user": "azureuser",
+            "sap_vm_provision_bastion_ssh_port": "22",
+            "sap_vm_provision_ssh_bastion_private_key_file_path": "/mnt/ssh/azure_key",
+        }
+        with patch.dict(console.os.environ, {}, clear=True):
+            info = console.connection_info.build_connection_info(job_vars, [{"name": "hanaaz1", "private_ip": "10.1.0.8"}])
+        self.assertIn("Host sap-bastion\n    HostName 198.51.100.7\n    User azureuser\n    Port 22", info["ssh_config"])
+        self.assertEqual(info["ssh_config"].count("ProxyJump sap-bastion"), 2)
+        self.assertIn("HostName ENTER_HOST_IP", info["ssh_config"])
+        self.assertTrue(any("hanaaz2" in note for note in info["notes"]))
+        self.assertTrue(any("/mnt/ssh" in note for note in info["notes"]))
+        self.assertEqual(info["commands"][0]["command"], "ssh sap-bastion")
+
+    def test_connection_route_returns_config(self):
+        state = {"generated_file": "/nonexistent.yml", "platform": "cloudstack_vm"}
+        with (
+            patch.object(console, "load_job_state", return_value=state),
+            patch.object(console, "load_generated_vars", return_value={}),
+            patch.object(console, "list_job_resources", return_value={"instances": []}),
+        ):
+            client = console.app.test_client()
+            data = client.get("/api/job/abc/connection").get_json()
+            download = client.get("/api/job/abc/ssh_config")
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("No hosts were found for this job.", data["notes"])
+        self.assertIn("attachment", download.headers["Content-Disposition"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -92,6 +92,21 @@
           </div>
         </section>
 
+        <section class="resource-box" id="connection-box">
+          <div class="resource-box-header">
+            <h3>Connect to your hosts</h3>
+            <div class="resource-actions">
+              <button type="button" class="btn btn-secondary" id="copy-ssh-config">Copy SSH config</button>
+              <a class="btn btn-secondary" id="download-ssh-config" href="/api/job/{{ job_id }}/ssh_config">Download SSH config</a>
+            </div>
+          </div>
+          <p class="review-note">Add this block to <code>~/.ssh/config</code> on your machine, then connect with the commands below.
+            Hosts behind a bastion are reached with <code>ProxyJump</code>; your private key stays on your machine.</p>
+          <pre id="ssh-config" class="job-log ssh-config">Loading connection details…</pre>
+          <ul id="ssh-commands" class="check-list"></ul>
+          <ul id="ssh-notes" class="check-list"></ul>
+        </section>
+
         <pre id="job-log" class="job-log">Waiting for the first log line…</pre>
       </main>
     </div>
@@ -138,6 +153,44 @@
         `).join('');
       }
 
+      const sshConfigNode = document.getElementById('ssh-config');
+      const sshCommandsNode = document.getElementById('ssh-commands');
+      const sshNotesNode = document.getElementById('ssh-notes');
+      const escapeText = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+
+      async function refreshConnection() {
+        try {
+          const response = await fetch(`/api/job/${jobId}/connection`);
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.message || 'Unable to load connection details.');
+          }
+          sshConfigNode.textContent = data.ssh_config;
+          sshCommandsNode.innerHTML = (data.commands || []).map((item) =>
+            `<li class="check-ok"><div><strong>${escapeText(item.name)}</strong><small><code>${escapeText(item.command)}</code></small></div></li>`).join('');
+          sshNotesNode.innerHTML = (data.notes || []).map((note) => `<li><div><small>${escapeText(note)}</small></div></li>`).join('');
+        } catch (error) {
+          sshConfigNode.textContent = error.message || 'Unable to load connection details.';
+        }
+      }
+
+      document.getElementById('copy-ssh-config').addEventListener('click', async (event) => {
+        const text = sshConfigNode.textContent;
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch (error) {
+          // Clipboard API needs HTTPS or localhost; fall back to a temporary text area
+          const area = document.createElement('textarea');
+          area.value = text;
+          document.body.appendChild(area);
+          area.select();
+          document.execCommand('copy');
+          area.remove();
+        }
+        event.target.textContent = 'Copied';
+        setTimeout(() => { event.target.textContent = 'Copy SSH config'; }, 1500);
+      });
+
       async function refreshResources() {
         try {
           const response = await fetch(`/api/job/${jobId}/resources`);
@@ -180,13 +233,15 @@
           if (data.status === 'success' || data.status === 'failed') {
             clearInterval(timer);
             refreshResources();
+            refreshConnection();
           }
         } catch (error) {
           summaryNode.textContent = 'The job is not available yet or has already finished.';
         }
       }
 
-      refreshResourcesButton.addEventListener('click', refreshResources);
+      refreshResourcesButton.addEventListener('click', () => { refreshResources(); refreshConnection(); });
+      refreshConnection();
       terminateResourcesButton.addEventListener('click', async () => {
         if (!window.confirm(`Terminate the provisioned resources for this job on ${resourcePlatformLabel} and delete any remaining attached volumes that are not auto-deleted?`)) {
           return;
