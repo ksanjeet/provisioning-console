@@ -2554,28 +2554,37 @@ def terminate_job_aws_resources(job_state):
     }
 
 
-def list_job_azure_resources(job_state):
-    generated_vars_path = job_state.get("generated_file")
-    job_vars = load_generated_vars(generated_vars_path) if generated_vars_path else {}
-    if job_vars.get("sap_vm_provision_iac_platform") != "msazure_vm":
-        return {"platform": None, "instances": [], "volumes": [], "message": "No Azure generated vars file recorded for this job."}
+def _azure_clients(job_vars):
+    """Compute and network management clients for the subscription of an Azure job."""
     try:
         from azure.identity import ClientSecretCredential
         from azure.mgmt.compute import ComputeManagementClient
         from azure.mgmt.network import NetworkManagementClient
     except ImportError as exc:
         raise RuntimeError("The Azure SDK is not installed in the application environment.") from exc
-
-    hostnames = [host["name"] for host in connection_info._planned_hosts(job_vars)]
-    resource_group = job_vars.get("sap_vm_provision_msazure_resource_group_name")
     subscription = job_vars.get("sap_vm_provision_msazure_subscription_id")
     credential = ClientSecretCredential(
         tenant_id=job_vars.get("sap_vm_provision_msazure_tenant_id"),
         client_id=job_vars.get("sap_vm_provision_msazure_app_client_id"),
         client_secret=job_vars.get("sap_vm_provision_msazure_app_client_secret"),
     )
-    compute = ComputeManagementClient(credential, subscription)
-    network = NetworkManagementClient(credential, subscription)
+    return ComputeManagementClient(credential, subscription), NetworkManagementClient(credential, subscription)
+
+
+def _load_azure_job_vars(job_state):
+    generated_vars_path = job_state.get("generated_file")
+    job_vars = load_generated_vars(generated_vars_path) if generated_vars_path else {}
+    return job_vars if job_vars.get("sap_vm_provision_iac_platform") == "msazure_vm" else None
+
+
+def list_job_azure_resources(job_state):
+    job_vars = _load_azure_job_vars(job_state)
+    if job_vars is None:
+        return {"platform": None, "instances": [], "volumes": [], "message": "No Azure generated vars file recorded for this job."}
+
+    hostnames = [host["name"] for host in connection_info._planned_hosts(job_vars)]
+    resource_group = job_vars.get("sap_vm_provision_msazure_resource_group_name")
+    compute, network = _azure_clients(job_vars)
     instances, volumes = [], []
     for name in hostnames:
         try:
@@ -2602,6 +2611,156 @@ def list_job_azure_resources(job_state):
         "volumes": volumes,
         "message": f"Found {len(instances)} instance(s) for this job.",
     }
+
+
+def _azure_resource_name(resource_id):
+    return (resource_id or "").rstrip("/").split("/")[-1]
+
+
+def _azure_is_not_found(exc):
+    return exc.__class__.__name__ == "ResourceNotFoundError" or getattr(exc, "status_code", None) == 404
+
+
+def terminate_job_azure_resources(job_state):
+    """Delete the VMs of an Azure job (only hosts of the job's host plan) and the resources created for them.
+
+    Deleted: VMs, their NICs, OS and data disks; SBD shared disks (tag sap_vm_provision=sbd) whose hosts are all job
+    hosts; HA load balancers created by the role once their backend pools are empty; HA availability sets once empty.
+    Kept: everything else (bastion, VNet/NSG, private DNS zone, SSH keys, other disks and load balancers).
+    """
+    job_vars = _load_azure_job_vars(job_state)
+    if job_vars is None:
+        return {"terminated_instances": [], "deleted_volumes": [], "message": "No Azure generated vars file recorded for this job."}
+
+    hostnames = [host["name"] for host in connection_info._planned_hosts(job_vars)]
+    if not hostnames:
+        return {"terminated_instances": [], "deleted_volumes": [], "message": "No Azure hostnames were found in the generated job variables."}
+    resource_group = job_vars.get("sap_vm_provision_msazure_resource_group_name")
+    compute, network = _azure_clients(job_vars)
+    errors, terminated, deleted_volumes, deleted_other = [], [], [], []
+
+    # 1. Delete the job's VMs, remember their NICs and non-shared disks
+    nic_names, disk_names = [], []
+    for name in hostnames:
+        try:
+            vm = compute.virtual_machines.get(resource_group, name)
+        except Exception as exc:
+            if not _azure_is_not_found(exc):
+                errors.append(f"VM {name}: {exc}")
+            continue
+        nic_names += [_azure_resource_name(ref.id) for ref in (vm.network_profile.network_interfaces or [])]
+        os_disk = vm.storage_profile.os_disk
+        if os_disk is not None:
+            disk_names.append(_azure_resource_name(os_disk.managed_disk.id) if os_disk.managed_disk else os_disk.name)
+        for data_disk in vm.storage_profile.data_disks or []:
+            disk_name = _azure_resource_name(data_disk.managed_disk.id) if data_disk.managed_disk else data_disk.name
+            try:
+                if (compute.disks.get(resource_group, disk_name).max_shares or 1) > 1:
+                    continue  # shared disks (e.g. SBD) are handled below
+            except Exception:
+                pass
+            disk_names.append(disk_name)
+        try:
+            compute.virtual_machines.begin_delete(resource_group, name).result()
+            terminated.append(name)
+        except Exception as exc:
+            errors.append(f"VM {name}: {exc}")
+
+    # 2. NICs and disks of the deleted VMs (skip anything still attached elsewhere)
+    for nic_name in nic_names:
+        try:
+            network.network_interfaces.begin_delete(resource_group, nic_name).result()
+            deleted_other.append(f"nic:{nic_name}")
+        except Exception as exc:
+            if not _azure_is_not_found(exc):
+                errors.append(f"NIC {nic_name}: {exc}")
+
+    def _delete_disk(disk_name):
+        try:
+            disk = compute.disks.get(resource_group, disk_name)
+        except Exception as exc:
+            if not _azure_is_not_found(exc):
+                errors.append(f"Disk {disk_name}: {exc}")
+            return
+        if disk.managed_by or (disk.managed_by_extended or []):
+            errors.append(f"Disk {disk_name} is still attached and was kept")
+            return
+        try:
+            compute.disks.begin_delete(resource_group, disk_name).result()
+            deleted_volumes.append(disk_name)
+        except Exception as exc:
+            errors.append(f"Disk {disk_name}: {exc}")
+
+    for disk_name in disk_names:
+        _delete_disk(disk_name)
+
+    # Shared HA resources (SBD disk, load balancer, availability set) are only cleaned up together with job VMs,
+    # so an empty load balancer or availability set of a deployment in progress is never removed
+    if not terminated:
+        message = "No Azure VMs of this job were found; shared resources were not changed."
+        if errors:
+            message += " Issues: " + "; ".join(errors)
+        return {"terminated_instances": [], "deleted_volumes": deleted_volumes, "message": message}
+
+    # 3. SBD shared disks (fencing method sbd_shared_disk) whose hosts are all hosts of this job
+    try:
+        for disk in compute.disks.list_by_resource_group(resource_group):
+            tags = disk.tags or {}
+            owners = [host for host in tags.get("sap_vm_provision_hosts", "").split("_") if host]
+            if tags.get("sap_vm_provision") == "sbd" and owners and set(owners) <= set(hostnames):
+                _delete_disk(disk.name)
+    except Exception as exc:
+        errors.append(f"SBD shared disks: {exc}")
+
+    # 4. HA load balancers created by the role, only when no backend address remains
+    lb_names = {job_vars.get(key) or default for key, default in (
+        ("sap_vm_provision_ha_load_balancer_name_hana", "lb-sap-ha-hana"),
+        ("sap_vm_provision_ha_load_balancer_name_anydb", "lb-sap-ha-anydb"),
+        ("sap_vm_provision_ha_load_balancer_name_nwas", "lb-sap-ha-nwas"))}
+    for lb_name in sorted(lb_names):
+        try:
+            lb = network.load_balancers.get(resource_group, lb_name)
+        except Exception as exc:
+            if not _azure_is_not_found(exc):
+                errors.append(f"Load balancer {lb_name}: {exc}")
+            continue
+        pools_in_use = [pool.name for pool in (lb.backend_address_pools or [])
+                        if (pool.backend_ip_configurations or []) or (pool.load_balancer_backend_addresses or [])]
+        if pools_in_use:
+            errors.append(f"Load balancer {lb_name} still has backends ({', '.join(pools_in_use)}) and was kept")
+            continue
+        try:
+            network.load_balancers.begin_delete(resource_group, lb_name).result()
+            deleted_other.append(f"lb:{lb_name}")
+        except Exception as exc:
+            errors.append(f"Load balancer {lb_name}: {exc}")
+
+    # 5. HA availability sets of the role, only when empty
+    avset_prefix = job_vars.get("sap_vm_provision_msazure_placement_resource_name") or "sap-availability-set-spread"
+    for suffix in ("hana", "anydb", "nwas"):
+        avset_name = f"{avset_prefix}-{suffix}"
+        try:
+            avset = compute.availability_sets.get(resource_group, avset_name)
+        except Exception as exc:
+            if not _azure_is_not_found(exc):
+                errors.append(f"Availability set {avset_name}: {exc}")
+            continue
+        if avset.virtual_machines:
+            continue
+        try:
+            compute.availability_sets.delete(resource_group, avset_name)
+            deleted_other.append(f"avset:{avset_name}")
+        except Exception as exc:
+            errors.append(f"Availability set {avset_name}: {exc}")
+
+    if not terminated and not deleted_volumes and not deleted_other and not errors:
+        message = "No Azure resources of this job were found."
+    else:
+        message = (f"Deleted {len(terminated)} VM(s), {len(deleted_volumes)} disk(s)"
+                   f"{' and ' + ', '.join(deleted_other) if deleted_other else ''}.")
+        if errors:
+            message += " Issues: " + "; ".join(errors)
+    return {"terminated_instances": terminated, "deleted_volumes": deleted_volumes, "message": message}
 
 
 def build_job_connection_info(job_state):
@@ -2660,6 +2819,7 @@ def terminate_job_resources_for_platform(job_state):
     platform = get_job_platform(job_state)
     terminate_handlers = {
         "aws_ec2_vs": terminate_job_aws_resources,
+        "msazure_vm": terminate_job_azure_resources,
         "cloudstack_vm": terminate_job_cloudstack_resources,
     }
     handler = terminate_handlers.get(platform)

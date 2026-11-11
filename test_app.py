@@ -536,5 +536,105 @@ class ConnectionInfoTests(unittest.TestCase):
         self.assertIn("attachment", download.headers["Content-Disposition"])
 
 
+class AzureTeardownTests(unittest.TestCase):
+    """terminate_job_azure_resources with fake Azure SDK clients."""
+
+    def _setup(self, extra_disks=(), lb_backends=False, sbd_hosts="hanaaz1_hanaaz2", sbd_attached=False):
+        from types import SimpleNamespace as NS
+
+        class NotFound(Exception):
+            status_code = 404
+
+        calls = []
+        rid = lambda kind, name: f"/subscriptions/s/resourceGroups/rg/providers/{kind}/{name}"
+        vms = {
+            name: NS(network_profile=NS(network_interfaces=[NS(id=rid("nic", f"{name}-nic"))]),
+                     storage_profile=NS(os_disk=NS(name=f"{name}-os", managed_disk=NS(id=rid("disk", f"{name}-os"))),
+                                        data_disks=[NS(name=f"{name}-vol_hana0", managed_disk=NS(id=rid("disk", f"{name}-vol_hana0"))),
+                                                    NS(name="sbd-hanaaz1", managed_disk=NS(id=rid("disk", "sbd-hanaaz1")))]))
+            for name in ("hanaaz1", "hanaaz2")
+        }
+        disks = {f"{n}-{k}": NS(name=f"{n}-{k}", max_shares=1, managed_by=None, managed_by_extended=[], tags={})
+                 for n in ("hanaaz1", "hanaaz2") for k in ("os", "vol_hana0")}
+        disks["sbd-hanaaz1"] = NS(name="sbd-hanaaz1", max_shares=2, managed_by=None,
+                                  managed_by_extended=["vm"] if sbd_attached else [],
+                                  tags={"sap_vm_provision": "sbd", "sap_vm_provision_hosts": sbd_hosts})
+        for disk in extra_disks:
+            disks[disk.name] = disk
+        done = NS(result=lambda: None)
+
+        def get_or_404(store, name):
+            if name not in store:
+                raise NotFound(name)
+            return store[name]
+
+        compute = NS(
+            virtual_machines=NS(get=lambda rg, name: get_or_404(vms, name),
+                                begin_delete=lambda rg, name: (calls.append(("vm", name)), done)[1]),
+            disks=NS(get=lambda rg, name: get_or_404(disks, name),
+                     list_by_resource_group=lambda rg: list(disks.values()),
+                     begin_delete=lambda rg, name: (calls.append(("disk", name)), done)[1]),
+            availability_sets=NS(get=lambda rg, name: get_or_404({"sap-availability-set-spread-hana": NS(virtual_machines=[])}, name),
+                                 delete=lambda rg, name: calls.append(("avset", name))),
+        )
+        pool = NS(name="pool", backend_ip_configurations=[NS(id="x")] if lb_backends else [], load_balancer_backend_addresses=[])
+        network = NS(
+            network_interfaces=NS(begin_delete=lambda rg, name: (calls.append(("nic", name)), done)[1]),
+            load_balancers=NS(get=lambda rg, name: get_or_404({"lb-sap-ha-hana": NS(backend_address_pools=[pool]),
+                                                               "chana-lb": NS(backend_address_pools=[])}, name),
+                              begin_delete=lambda rg, name: (calls.append(("lb", name)), done)[1]),
+        )
+        job_vars = {
+            "sap_vm_provision_iac_platform": "msazure_vm",
+            "sap_vm_provision_host_specification_plan": "plan1",
+            "sap_vm_provision_msazure_resource_group_name": "rg",
+            "sap_vm_provision_msazure_vm_host_specifications_dictionary": {"plan1": {
+                "hanaaz1": {"sap_host_type": "hana_primary"}, "hanaaz2": {"sap_host_type": "hana_secondary"}}},
+        }
+        return calls, compute, network, job_vars
+
+    def _run(self, compute, network, job_vars):
+        with (
+            patch.object(console, "load_generated_vars", return_value=job_vars),
+            patch.object(console, "_azure_clients", return_value=(compute, network)),
+        ):
+            return console.terminate_job_azure_resources({"generated_file": "/x.yml"})
+
+    def test_vms_nics_disks_sbd_lb_and_avset_deleted(self):
+        calls, compute, network, job_vars = self._setup()
+        result = self._run(compute, network, job_vars)
+        self.assertEqual(result["terminated_instances"], ["hanaaz1", "hanaaz2"])
+        self.assertIn(("nic", "hanaaz1-nic"), calls)
+        self.assertIn(("disk", "hanaaz2-vol_hana0"), calls)
+        self.assertIn(("disk", "sbd-hanaaz1"), calls)
+        self.assertEqual(calls.count(("disk", "sbd-hanaaz1")), 1)
+        self.assertIn(("lb", "lb-sap-ha-hana"), calls)
+        self.assertNotIn(("lb", "chana-lb"), calls)
+        self.assertIn(("avset", "sap-availability-set-spread-hana"), calls)
+
+    def test_sbd_disk_kept_when_other_hosts_or_attached(self):
+        calls, compute, network, job_vars = self._setup(sbd_hosts="hanaaz1_otherhost")
+        self._run(compute, network, job_vars)
+        self.assertNotIn(("disk", "sbd-hanaaz1"), calls)
+        calls, compute, network, job_vars = self._setup(sbd_attached=True)
+        result = self._run(compute, network, job_vars)
+        self.assertNotIn(("disk", "sbd-hanaaz1"), calls)
+        self.assertIn("still attached", result["message"])
+
+    def test_load_balancer_kept_with_backends(self):
+        calls, compute, network, job_vars = self._setup(lb_backends=True)
+        result = self._run(compute, network, job_vars)
+        self.assertNotIn(("lb", "lb-sap-ha-hana"), calls)
+        self.assertIn("still has backends", result["message"])
+
+    def test_nothing_deleted_for_hosts_not_in_plan(self):
+        calls, compute, network, job_vars = self._setup()
+        job_vars["sap_vm_provision_msazure_vm_host_specifications_dictionary"] = {"plan1": {"otherhost1": {"sap_host_type": "hana_primary"}}}
+        result = self._run(compute, network, job_vars)
+        self.assertEqual(calls, [])  # no VMs, NICs, disks, load balancers or availability sets
+        self.assertEqual(result["terminated_instances"], [])
+        self.assertIn("shared resources were not changed", result["message"])
+
+
 if __name__ == "__main__":
     unittest.main()
