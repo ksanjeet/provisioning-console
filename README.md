@@ -108,26 +108,38 @@ docker compose up --build
 
 Then open http://localhost:5000.
 
+By default the console listens on `127.0.0.1` only. To use it from another machine, publish it on all interfaces and enable authentication, for example in a `.env` file next to `compose.yml`:
+
+```bash
+SAP_WIZARD_PUBLISH_ADDRESS=0.0.0.0
+SAP_WIZARD_AUTH_USER=admin
+SAP_WIZARD_AUTH_PASSWORD=<strong password>
+SAP_SSH_DIR=/path/to/.ssh
+```
+
+The console is a single-user tool: saved provider profiles (cloud credentials) and generated variables (SAP passwords) are stored in plaintext in the state directory `./container-data` (`/var/lib/sap-wizard` in the container). Keep this directory private and do not share it or bake it into images. Saved wizard input files (*Save inputs as JSON*) never contain passwords, secrets or keys.
+
 To keep the container portable across workstations, the compose file mounts host media and SSH directories through environment variables. Set them before starting the stack if your files do not live under `./media` and `./ssh`:
 
 ```bash
-export SAP_MEDIA_DIR=/data/LL/sapsoftware
-export SAP_SSH_DIR=/home/ksanjeet/.ssh
+export SAP_MEDIA_DIR=/path/to/sap/media
+export SAP_SSH_DIR=$HOME/.ssh
 docker compose up --build
 ```
 
 Containerization details:
-- [Dockerfile](/data/LL/git/ksanjeet/ansible.playbooks_for_sap/Dockerfile) pins Python dependencies from [requirements-container.txt](/data/LL/git/ksanjeet/ansible.playbooks_for_sap/requirements-container.txt).
-- [container/ansible-requirements.yml](/data/LL/git/ksanjeet/ansible.playbooks_for_sap/container/ansible-requirements.yml) pins the Ansible collections used by the UI.
+- [Dockerfile](Dockerfile) pins Python dependencies from [requirements-container.txt](requirements-container.txt).
+- [container/ansible-requirements.yml](container/ansible-requirements.yml) pins the Ansible collections used by the UI.
 - `container/apply_collection_patches.py` reapplies the AWS session-token fix for `community.sap_infrastructure`, the storage-size normalization fix for `community.sap_install`, and the HANA HSR runtime fixes. HSR status, enable, register, unregister, and disable commands first enter the instance directory so environment discovery does not inherit an inaccessible SSH-user home directory. They source the instance-level `hdbenv.sh` under Bash (without loading the user's `.profile`) and run from the initialized host directory. Environment initialization errors stop the command rather than being ignored. HSR command tasks are patched as parsed YAML and validated before writing; the local Flask UI also rechecks patch requirements after patching.
 - HA scenarios default to normal HANA logging. Before HSR backup and enablement, the collection patch removes a local HOST-level `log_mode=overwrite` override left by older wizard runs so SYSTEM-level normal logging can take effect. SQL failures stop the repair; other HOST settings are preserved.
 - After changing the patch helper, rebuild and recreate the service with `docker compose up -d --build --force-recreate sap-wizard`. Recreating an existing image alone does not refresh its build-time collection patches. To patch an existing container using its current application code, run `docker compose exec sap-wizard python /opt/sap-wizard/container/apply_collection_patches.py /opt/ansible/collections`; do not use a stale helper copied to `/tmp` during an earlier build.
-- [compose.yml](/data/LL/git/ksanjeet/ansible.playbooks_for_sap/compose.yml) persists runtime state in [container-data/](/data/LL/git/ksanjeet/ansible.playbooks_for_sap/container-data) and can be extended with mounts for SSH keys, media, and the libvirt socket.
+- [compose.yml](compose.yml) persists runtime state in [container-data/](container-data) and can be extended with mounts for SSH keys, and media.
 
 Important notes when running in the container:
-- Generated jobs, logs, and saved provider profiles are stored under `/var/lib/sap-wizard` inside the container and persisted through the [compose.yml](/data/LL/git/ksanjeet/ansible.playbooks_for_sap/compose.yml) volume mount.
+- Generated jobs, logs, and saved provider profiles are stored under `/var/lib/sap-wizard` inside the container and persisted through the [compose.yml](compose.yml) volume mount.
 - If your playbooks reference SSH keys or media files, mount them into the container and enter the container path in the UI (for example `/mnt/ssh/id_rsa`).
-- For local KVM/libvirt support, mount `/var/run/libvirt/libvirt-sock` into the container as shown in the commented example in [compose.yml](/data/LL/git/ksanjeet/ansible.playbooks_for_sap/compose.yml).
+- Apache CloudStack: save the API URL, key and secret in the CloudStack provider card. Only credentials entered in the UI (or `CLOUDSTACK_*` environment variables passed to the container) are used.
+- The image build installs `community.sap_infrastructure` (with the Apache CloudStack platform) from the build context `sap_infrastructure`, by default the sibling checkout `../community.sap_infrastructure` (override with `SAP_INFRASTRUCTURE_DIR`). The source is bind-mounted during the build and not stored in image layers.
 
 ### Ansible with existing host(s)
 This method is used to install the SAP system on an existing host(s).  

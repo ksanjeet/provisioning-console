@@ -78,3 +78,6 @@ __pycache__/
 
 # VSCode
 .vscode
+cloudstack.ini
+.flask_secret_key
+.pytest_cache/
