@@ -74,6 +74,12 @@
             <button type="button" class="btn btn-secondary" id="provider-config-cancel">Close</button>
           </div>
         </div>
+        <div class="provider-tabs" role="tablist" aria-label="Infrastructure providers">
+          <button type="button" class="provider-tab" role="tab" data-provider-tab="aws_ec2_vs" aria-selected="false">AWS</button>
+          <button type="button" class="provider-tab" role="tab" data-provider-tab="gcp_ce_vm" aria-selected="false">Google Cloud</button>
+          <button type="button" class="provider-tab" role="tab" data-provider-tab="msazure_vm" aria-selected="false">Microsoft Azure</button>
+          <button type="button" class="provider-tab" role="tab" data-provider-tab="cloudstack_vm" aria-selected="false">Apache CloudStack</button>
+        </div>
         <div class="provider-config-feedback resource-item-meta" id="provider-config-feedback"></div>
         <form class="provider-config-form" id="provider-config-form">
           <input type="hidden" id="provider-config-provider" name="provider">
@@ -880,6 +886,11 @@
       }
 
       function toggleProviderConfigSections(provider) {
+        document.querySelectorAll('[data-provider-tab]').forEach((tab) => {
+          const active = tab.dataset.providerTab === provider;
+          tab.classList.toggle('active', active);
+          tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
         document.querySelectorAll('.provider-config-fields').forEach((section) => {
           const matches = section.dataset.providerFields === provider;
           section.hidden = !matches;
@@ -906,8 +917,9 @@
           throw new Error('Unable to load saved provider profile.');
         }
         const payload = await response.json();
+        const section = providerConfigForm.querySelector(`.provider-config-fields[data-provider-fields="${provider}"]`);
         Object.entries(payload).forEach(([key, value]) => {
-          const field = providerConfigForm.querySelector(`[name="${key}"]`);
+          const field = section ? section.querySelector(`[name="${key}"]`) : null;
           if (!field) {
             return;
           }
@@ -915,13 +927,15 @@
         });
       }
 
-      async function openProviderConfiguration(provider) {
+      async function openProviderConfiguration(provider, { scroll = true } = {}) {
         if (!providerConfigMetadata[provider]) {
           return;
         }
         resetProviderConfigForm(provider);
         providerConfigPanel.hidden = false;
-        providerConfigPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (scroll) {
+          providerConfigPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
         try {
           await populateProviderConfigForm(provider);
         } catch (error) {
@@ -1264,6 +1278,9 @@
       document.querySelector('[name="ha_secondary_hostname"]').addEventListener('input', updateReview);
       document.querySelector('[name="ha_vip_hana_primary"]').addEventListener('input', updateReview);
       wizardJsonFile.addEventListener('change', loadWizardJsonFile);
+      document.querySelectorAll('[data-provider-tab]').forEach((tab) => {
+        tab.addEventListener('click', () => openProviderConfiguration(tab.dataset.providerTab, { scroll: false }));
+      });
       document.querySelectorAll('[data-save-wizard-json]').forEach((button) => {
         button.addEventListener('click', saveWizardJsonFile);
       });

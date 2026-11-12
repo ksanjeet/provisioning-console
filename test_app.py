@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -400,6 +401,19 @@ class CloudStackPlatformTests(unittest.TestCase):
         self.assertIn('<option value="cloudstack_vm"', html)
         self.assertIn('data-provider-fields="cloudstack_vm"', html)
         self.assertIn('id="cloudstack-fields"', html)
+
+    def test_provider_configuration_has_one_tab_per_provider(self):
+        with (
+            patch.object(console, "check_dependencies", return_value=[]),
+            patch.object(console, "list_recent_jobs", return_value=[]),
+        ):
+            html = console.app.test_client().get("/").get_data(as_text=True)
+        for provider in ("aws_ec2_vs", "gcp_ce_vm", "msazure_vm", "cloudstack_vm"):
+            with self.subTest(provider=provider):
+                self.assertEqual(html.count(f'data-provider-tab="{provider}"'), 1)
+                self.assertEqual(html.count(f'data-provider-fields="{provider}"'), 1)
+        css = (Path(console.app.static_folder) / "styles.css").read_text()
+        self.assertRegex(css, r"\[hidden\]\s*\{\s*display:\s*none\s*!important")
 
 
 class WizardJsonSaveTests(unittest.TestCase):
