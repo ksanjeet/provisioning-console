@@ -83,11 +83,13 @@
             <label><span>AWS secret access key</span><input type="password" name="aws_secret_access_key"></label>
             <label><span>AWS session token (optional)</span><input type="password" name="aws_session_token"></label>
             <label><span>AWS region</span><input type="text" name="aws_region" placeholder="us-east-1"></label>
+            <label class="wide-field"><span>Owner tag (your e-mail or user ID)</span><input type="text" name="owner_tag" placeholder="user@example.com"><small>VMs provisioned with this provider are tagged Owner=&lt;value&gt;; the inventory lists and allows deleting only VMs with this tag.</small></label>
           </div>
 
           <div class="field-grid provider-config-fields" data-provider-fields="gcp_ce_vm" hidden>
             <label><span>GCP credentials JSON path</span><input type="text" name="gcp_credentials_json" placeholder="/path/to/service-account.json"></label>
             <label><span>GCP project</span><input type="text" name="gcp_project"></label>
+            <label class="wide-field"><span>Owner tag (your e-mail or user ID)</span><input type="text" name="owner_tag" placeholder="user@example.com"><small>VMs provisioned with this provider are tagged Owner=&lt;value&gt;; the inventory lists and allows deleting only VMs with this tag.</small></label>
           </div>
 
           <div class="field-grid provider-config-fields" data-provider-fields="msazure_vm" hidden>
@@ -96,6 +98,7 @@
             <label><span>Azure client ID</span><input type="text" name="azure_client_id"></label>
             <label><span>Azure client secret</span><input type="password" name="azure_client_secret"></label>
             <label><span>Azure resource group</span><input type="text" name="azure_resource_group_name" placeholder="sap-demo-rg"></label>
+            <label class="wide-field"><span>Owner tag (your e-mail or user ID)</span><input type="text" name="owner_tag" placeholder="user@example.com"><small>VMs provisioned with this provider are tagged Owner=&lt;value&gt;; the inventory lists and allows deleting only VMs with this tag.</small></label>
           </div>
 
           <div class="field-grid provider-config-fields" data-provider-fields="cloudstack_vm" hidden>
@@ -103,6 +106,7 @@
             <label><span>CloudStack API key</span><input type="password" name="cloudstack_api_key"></label>
             <label><span>CloudStack API secret</span><input type="password" name="cloudstack_api_secret"></label>
             <label><span>CloudStack zone (optional)</span><input type="text" name="cloudstack_zone" placeholder="zone1"></label>
+            <label class="wide-field"><span>Owner tag (your e-mail or user ID)</span><input type="text" name="owner_tag" placeholder="user@example.com"><small>VMs provisioned with this provider are tagged Owner=&lt;value&gt;; the inventory lists and allows deleting only VMs with this tag.</small></label>
           </div>
 
           <div class="provider-config-form-actions">

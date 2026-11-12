@@ -286,7 +286,7 @@ class CloudStackPlatformTests(unittest.TestCase):
             destroyed = []
 
             def listVirtualMachines(self, **params):
-                return [{"id": "vm-2", "name": "hanahost1", "tags": [{"key": "sap_vm_provision", "value": "plan"}]}]
+                return [{"id": "vm-2", "name": "hanahost1", "tags": [{"key": "sap_vm_provision", "value": "plan"}, {"key": "Owner", "value": "me@example.com"}]}]
 
             def listVolumes(self, **params):
                 return [{"id": "vol-a"}, {"id": "vol-b"}]
@@ -299,7 +299,7 @@ class CloudStackPlatformTests(unittest.TestCase):
             patch.object(console.cloudstack_support, "build_client", return_value=client),
             patch.object(console.cloudstack_support, "resolve_credentials", return_value={"x": "y"}),
         ):
-            result = console.cloudstack_support.delete_dashboard_resource({"instance_id": "vm-2"}, {})
+            result = console.cloudstack_support.delete_dashboard_resource({"instance_id": "vm-2"}, {"cloudstack_vm": {"owner_tag": "me@example.com"}})
         self.assertEqual(client.destroyed[0]["volumeids"], "vol-a,vol-b")
         self.assertTrue(client.destroyed[0]["expunge"])
         self.assertIn("hanahost1", result["message"])
@@ -340,7 +340,7 @@ class CloudStackPlatformTests(unittest.TestCase):
         class Client:
             def listVirtualMachines(self, **params):
                 if params.get("id") == "vm-2":
-                    return [{"id": "vm-2", "name": "hanahost1", "tags": [{"key": "sap_vm_provision", "value": "plan"}]}]
+                    return [{"id": "vm-2", "name": "hanahost1", "tags": [{"key": "sap_vm_provision", "value": "plan"}, {"key": "Owner", "value": "me@example.com"}]}]
                 return remaining_vms.get(params.get("name"), [])
 
             def listVolumes(self, **params):
@@ -378,10 +378,10 @@ class CloudStackPlatformTests(unittest.TestCase):
             patch.object(sup, "_linstor_url", return_value="http://linstor:3370"),
             patch.object(sup.urllib_request, "urlopen", side_effect=fake_urlopen),
         ):
-            sup.delete_dashboard_resource({"instance_id": "vm-2"}, {})
+            sup.delete_dashboard_resource({"instance_id": "vm-2"}, {"cloudstack_vm": {"owner_tag": "me@example.com"}})
             self.assertEqual(deleted, [])  # hanahost2 still exists
             remaining_vms.clear()
-            result = sup.delete_dashboard_resource({"instance_id": "vm-2"}, {})
+            result = sup.delete_dashboard_resource({"instance_id": "vm-2"}, {"cloudstack_vm": {"owner_tag": "me@example.com"}})
         self.assertEqual(deleted, ["http://linstor:3370/v1/resource-definitions/sbd-hanahost1"])
         self.assertIn("sbd-hanahost1", result["message"])
 
@@ -776,6 +776,62 @@ class GcpTeardownTests(unittest.TestCase):
         result = console.gcp_support.list_job_resources(job, "GCP")
         self.assertEqual(result["instances"][0]["private_ip"], "10.0.0.4")
         self.assertEqual(len(result["volumes"]), 2)
+
+
+class OwnerTagTests(unittest.TestCase):
+    def test_owner_match_per_platform(self):
+        self.assertTrue(console.owner_tag_matches("msazure_vm", {"Owner": "Me@Example.com"}, "me@example.com"))
+        self.assertTrue(console.owner_tag_matches("cloudstack_vm", {"owner": "me@example.com"}, "me@example.com"))
+        self.assertTrue(console.owner_tag_matches("gcp_ce_vm", {"owner": "me_x-at-example_com"}, "Me.X@example.com"))
+        self.assertFalse(console.owner_tag_matches("gcp_ce_vm", {"owner": "someone-else"}, "me@example.com"))
+        self.assertFalse(console.owner_tag_matches("aws_ec2_vs", {"Name": "vm1"}, "me@example.com"))
+        self.assertFalse(console.owner_tag_matches("aws_ec2_vs", {"Owner": "me@example.com"}, ""))
+
+    def _status(self):
+        return {"provider": "msazure_vm", "details": [], "resources": [
+            {"name": "mine", "tags": {"Owner": "me@example.com"}, "deletable": True},
+            {"name": "other", "tags": {"Owner": "you@example.com"}, "deletable": True},
+            {"name": "untagged", "tags": {}, "deletable": True}]}
+
+    def test_filter_lists_only_own_vms_and_allows_delete_only_for_them(self):
+        status = console.apply_owner_filter(self._status(), "me@example.com")
+        self.assertEqual([r["name"] for r in status["resources"]], ["mine"])
+        self.assertTrue(status["resources"][0]["deletable"])
+        self.assertTrue(any("2 other VM(s) hidden" in d for d in status["details"]))
+
+    def test_without_owner_everything_is_listed_read_only(self):
+        status = console.apply_owner_filter(self._status(), "")
+        self.assertEqual(len(status["resources"]), 3)
+        self.assertFalse(any(r["deletable"] for r in status["resources"]))
+        self.assertTrue(any("Set an Owner tag" in d for d in status["details"]))
+
+    def test_owner_tag_is_passed_to_provisioning(self):
+        config = {"scenario": "sap_hana_ha", "media_dir": "/software", "iac_type": "ansible", "platform": "msazure_vm",
+                  "host_plan": "xsmall_256gb", "sid": "H01", "hana_sid": "H01", "product": "p", "sap_id_user": "u",
+                  "owner_tag": "me@example.com"}
+        self.assertEqual(sanitize_overrides(config)["sap_vm_provision_resource_tags"], {"Owner": "me@example.com"})
+        self.assertNotIn("sap_vm_provision_resource_tags", sanitize_overrides({**config, "owner_tag": ""}))
+        self.assertIn("owner_tag", console.PROVIDER_PROFILE_FIELDS["gcp_ce_vm"])
+        self.assertIn("owner_tag", console.cloudstack_support.PROFILE_FIELDS)
+
+    def test_cloudstack_delete_refuses_vm_of_other_owner(self):
+        class Client:
+            destroyed = []
+
+            def listVirtualMachines(self, **params):
+                return [{"id": "vm-9", "name": "x", "tags": [{"key": "Owner", "value": "you@example.com"}]}]
+
+            def destroyVirtualMachine(self, **params):
+                self.destroyed.append(params)
+
+        client = Client()
+        with (
+            patch.object(console.cloudstack_support, "build_client", return_value=client),
+            patch.object(console.cloudstack_support, "resolve_credentials", return_value={"x": "y"}),
+        ):
+            with self.assertRaises(RuntimeError):
+                console.cloudstack_support.delete_dashboard_resource({"instance_id": "vm-9"}, {"cloudstack_vm": {"owner_tag": "me@example.com"}})
+        self.assertEqual(client.destroyed, [])
 
 
 if __name__ == "__main__":

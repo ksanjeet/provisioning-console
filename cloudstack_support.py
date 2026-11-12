@@ -15,7 +15,7 @@ from urllib import request as urllib_request
 PLATFORM = "cloudstack_vm"
 ACCENT = "cloudstack"
 
-PROFILE_FIELDS = ["cloudstack_api_url", "cloudstack_api_key", "cloudstack_api_secret", "cloudstack_zone"]
+PROFILE_FIELDS = ["cloudstack_api_url", "cloudstack_api_key", "cloudstack_api_secret", "cloudstack_zone", "owner_tag"]
 PROFILE_REQUIRED_FIELDS = ["cloudstack_api_url", "cloudstack_api_key", "cloudstack_api_secret"]
 DEPLOYMENT_FIELDS = [
     "cloudstack_zone",
@@ -165,9 +165,9 @@ def inspect_dashboard(build_provider_status, build_dashboard_resource, saved_cre
             f"Template: {summary['template'] or 'n/a'}",
             "Provisioned by Ansible Playbooks for SAP" if managed else "Not provisioned by this console (read-only)",
         ]}
-        if managed:
-            # Only VMs created by sap_vm_provision (tag 'sap_vm_provision') can be destroyed from the dashboard
-            extra.update({"deletable": True, "delete_payload": {"instance_id": summary["instance_id"], "name": summary["name"]}})
+        # Visibility and delete permission are decided by the console's Owner tag filter
+        extra.update({"delete_payload": {"instance_id": summary["instance_id"], "name": summary["name"]},
+                      "tags": {tag.get("key"): tag.get("value") for tag in vm.get("tags", []) or []}})
         resources.append(build_dashboard_resource(
             PLATFORM,
             ACCENT,
@@ -200,8 +200,10 @@ def delete_dashboard_resource(payload, saved_credentials):
     if not vms:
         raise RuntimeError(f"CloudStack instance {instance_id} was not found.")
     vm = vms[0]
-    if not _is_provisioned_by_console(vm):
-        raise RuntimeError(f"CloudStack instance '{vm.get('name')}' was not provisioned by this console and is not deleted.")
+    owner = saved_credentials.get(PLATFORM, {}).get("owner_tag", "")
+    tags = {tag.get("key"): tag.get("value") for tag in vm.get("tags", []) or []}
+    if not owner or not any(str(k).lower() == "owner" and str(v).strip().lower() == owner.strip().lower() for k, v in tags.items()):
+        raise RuntimeError(f"CloudStack instance '{vm.get('name')}' is not tagged with your Owner tag and is not deleted.")
     data_volumes = [vol["id"] for vol in _list(client, "listVolumes", virtualmachineid=instance_id, type="DATADISK", listall=True)]
     params = {"id": instance_id, "expunge": True, "fetch_result": True}
     if data_volumes:

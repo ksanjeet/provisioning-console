@@ -156,9 +156,9 @@ DASHBOARD_PROVIDERS = [
 ]
 ACTIVE_INSTANCE_STATES = ["pending", "running", "stopping", "stopped", "shutting-down"]
 PROVIDER_PROFILE_FIELDS = {
-    "aws_ec2_vs": ["aws_access_key", "aws_secret_access_key", "aws_session_token", "aws_region"],
-    "gcp_ce_vm": ["gcp_credentials_json", "gcp_project"],
-    "msazure_vm": ["azure_subscription_id", "azure_tenant_id", "azure_client_id", "azure_client_secret", "azure_resource_group_name"],
+    "aws_ec2_vs": ["aws_access_key", "aws_secret_access_key", "aws_session_token", "aws_region", "owner_tag"],
+    "gcp_ce_vm": ["gcp_credentials_json", "gcp_project", "owner_tag"],
+    "msazure_vm": ["azure_subscription_id", "azure_tenant_id", "azure_client_id", "azure_client_secret", "azure_resource_group_name", "owner_tag"],
     "cloudstack_vm": cloudstack_support.PROFILE_FIELDS,
 }
 PROVIDER_PROFILE_REQUIRED_FIELDS = {
@@ -1063,6 +1063,7 @@ def inspect_aws_dashboard(saved_credentials):
                     ],
                     deletable=True,
                     delete_payload={"instance_id": instance_id},
+                    tags={tag.get("Key"): tag.get("Value") for tag in instance.get("Tags", []) or []},
                 )
             )
 
@@ -1151,6 +1152,7 @@ def inspect_gcp_dashboard(saved_credentials):
                             ],
                             deletable=True,
                             delete_payload={"name": instance.get("name"), "zone": zone},
+                            tags=instance.get("labels") or {},
                         )
                     )
             next_page_token = payload.get("nextPageToken")
@@ -1246,6 +1248,7 @@ def inspect_azure_dashboard(saved_credentials):
                 ],
                 deletable=True,
                 delete_payload={"resource_id": vm.get("id")},
+                tags=vm.get("tags") or {},
             )
         )
 
@@ -1341,6 +1344,7 @@ def inspect_azure_dashboard_scoped(saved_credentials):
                 ],
                 deletable=True,
                 delete_payload={"resource_id": vm.get("id")},
+                tags=vm.get("tags") or {},
             )
         )
 
@@ -1448,6 +1452,7 @@ def inspect_azure_dashboard_scoped_v2(saved_credentials):
                 ],
                 deletable=True,
                 delete_payload={"resource_id": vm.get("id")},
+                tags=vm.get("tags") or {},
             )
         )
 
@@ -1469,6 +1474,48 @@ def inspect_azure_dashboard_scoped_v2(saved_credentials):
     )
 
 
+OWNER_TAG_KEY = "Owner"
+
+
+def gcp_label_value(value):
+    """Value as stored in a Google Cloud label (same conversion as sap_vm_provision for GCP labels)."""
+    converted = str(value or "").lower().replace("@", "-at-")
+    return re.sub(r"[^a-z0-9_-]", "_", converted)[:63]
+
+
+def owner_tag_matches(platform, tags, owner):
+    """True if the resource tags carry the Owner tag of the configured owner (key case-insensitive)."""
+    if not owner or not isinstance(tags, dict):
+        return False
+    values = [str(value) for key, value in tags.items() if str(key).lower() == OWNER_TAG_KEY.lower()]
+    if platform == "gcp_ce_vm":
+        return gcp_label_value(owner) in values
+    return owner.strip().lower() in [value.strip().lower() for value in values]
+
+
+def apply_owner_filter(provider_status, owner):
+    """Show only VMs with the provider's Owner tag; only those can be deleted from the dashboard."""
+    resources = provider_status.get("resources") or []
+    if not resources:
+        return provider_status
+    platform = provider_status.get("provider")
+    if not owner:
+        for resource in resources:
+            resource["deletable"] = False
+        provider_status["details"] = list(provider_status.get("details") or []) + [
+            f"Set an Owner tag in the provider settings to list only your VMs and enable delete."]
+        return provider_status
+    mine = [resource for resource in resources if owner_tag_matches(platform, resource.get("tags"), owner)]
+    for resource in mine:
+        resource["deletable"] = True
+        resource.setdefault("delete_payload", {})
+    hidden = len(resources) - len(mine)
+    provider_status["resources"] = mine
+    provider_status["details"] = list(provider_status.get("details") or []) + [
+        f"Owner tag: {owner} ({len(mine)} VM(s) shown, {hidden} other VM(s) hidden)."]
+    return provider_status
+
+
 def build_provider_dashboard(force_refresh=False):
     now = time.time()
     cached = PROVIDER_DASHBOARD_CACHE.get("value")
@@ -1486,6 +1533,8 @@ def build_provider_dashboard(force_refresh=False):
         inspect_azure_dashboard_scoped_v2(saved_credentials),
         cloudstack_support.inspect_dashboard(_build_provider_status, _build_dashboard_resource, saved_credentials),
     ]
+    providers = [apply_owner_filter(provider, saved_credentials.get(provider["provider"], {}).get("owner_tag", ""))
+                 for provider in providers]
     all_resources = []
     for provider in providers:
         all_resources.extend(provider.get("resources", []))
@@ -1525,6 +1574,10 @@ def delete_dashboard_aws_resource(payload, saved_credentials):
         region_name=profile.get("aws_region"),
     )
     ec2_client = session.client("ec2", region_name=profile.get("aws_region"))
+    reservations = ec2_client.describe_instances(InstanceIds=[instance_id]).get("Reservations", [])
+    tags = {tag.get("Key"): tag.get("Value") for r in reservations for i in r.get("Instances", []) for tag in i.get("Tags", []) or []}
+    if not owner_tag_matches("aws_ec2_vs", tags, profile.get("owner_tag", "")):
+        raise RuntimeError(f"AWS instance {instance_id} is not tagged with your Owner tag and is not deleted.")
     ec2_client.terminate_instances(InstanceIds=[instance_id])
     return {"message": f"Termination requested for AWS instance {instance_id}."}
 
@@ -1542,6 +1595,13 @@ def delete_dashboard_gcp_resource(payload, saved_credentials):
 
     credentials = _gcp_access_token(Path(profile.get("gcp_credentials_json")).expanduser())
     project = profile.get("gcp_project")
+    instance = _http_json_request(
+        "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances/{}".format(
+            project, zone, urllib_parse.quote(instance_name)),
+        headers={"Authorization": f"Bearer {credentials.token}"},
+    )
+    if not owner_tag_matches("gcp_ce_vm", instance.get("labels") or {}, profile.get("owner_tag", "")):
+        raise RuntimeError(f"GCP instance {instance_name} is not labelled with your Owner tag and is not deleted.")
     _http_json_request(
         (
             "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances/{}"
@@ -1570,6 +1630,12 @@ def delete_dashboard_azure_resource(payload, saved_credentials):
         profile.get("azure_client_id"),
         profile.get("azure_client_secret"),
     )
+    vm = _http_json_request(
+        f"https://management.azure.com{resource_id}?api-version=2024-03-01",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    if not owner_tag_matches("msazure_vm", vm.get("tags") or {}, profile.get("owner_tag", "")):
+        raise RuntimeError(f"Azure VM {vm.get('name', resource_id)} is not tagged with your Owner tag and is not deleted.")
     _http_json_request(
         f"https://management.azure.com{resource_id}?api-version=2024-03-01",
         headers={"Authorization": f"Bearer {access_token}"},
@@ -2222,6 +2288,8 @@ def sanitize_overrides(config):
         "sap_swpm_db_system_password": system_password,
         "sap_swpm_db_systemdb_password": system_password,
         "sap_hana_install_use_master_password": "y",
+        # Owner tag from the provider profile, applied to the provisioned VMs (sap_vm_provision_resource_tags)
+        "sap_vm_provision_resource_tags": {OWNER_TAG_KEY: config["owner_tag"]} if config.get("owner_tag") else None,
         # Media downloaded in the console (sap_software_download_on_execution_node) is kept in the persistent
         # state directory and reused by later jobs, instead of the container's writable layer
         "sap_software_download_execution_node_directory": str(STATE_DIR / "sap_media"),
