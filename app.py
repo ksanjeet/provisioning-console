@@ -1638,7 +1638,7 @@ def build_target_environment(data):
         "schema_password": payload.get("schema_password", "").strip(),
         "sidadm_password": payload.get("sidadm_password", "").strip(),
         "inventory_file": payload.get("inventory_file", "").strip(),
-        "use_single_master_password": payload.get("use_single_master_password", "") in ["on", "true", "True", "1"],
+        "use_single_master_password": payload.get("use_single_master_password", "") in ["on", "true", "True", "1", True],
         "ha_primary_hostname": payload.get("ha_primary_hostname", "").strip(),
         "ha_secondary_hostname": payload.get("ha_secondary_hostname", "").strip(),
         "ha_primary_ip": payload.get("ha_primary_ip", "").strip(),
