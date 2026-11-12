@@ -402,11 +402,45 @@ def list_job_resources(job_vars, platform_label):
     }
 
 
+def _job_owner(job_vars):
+    tags = job_vars.get("sap_vm_provision_resource_tags") or {}
+    if not isinstance(tags, dict):
+        return ""
+    return str(next((value for key, value in tags.items() if str(key).lower() == "owner"), "") or "").strip()
+
+
+def _delete_leftover_volumes(job_vars):
+    """Instances of the job deleted outside the console: detached data volumes <host>-vol_* with the job's Owner tag."""
+    owner = _job_owner(job_vars)
+    hostnames = _job_hostnames(job_vars)
+    if not owner or not hostnames:
+        return {"terminated_instances": [], "deleted_volumes": [], "message": "No CloudStack instances were found for this job."}
+    client = build_client(credentials_from_job_vars(job_vars), timeout=300)
+    deleted, errors = [], []
+    for volume in _list(client, "listVolumes", type="DATADISK", listall=True):
+        name = volume.get("name") or ""
+        tags = {tag.get("key"): tag.get("value") for tag in volume.get("tags") or []}
+        if volume.get("virtualmachineid") or not any(name.startswith(f"{host}-vol_") for host in hostnames):
+            continue
+        if not any(str(key).lower() == "owner" and str(value).strip().lower() == owner.lower() for key, value in tags.items()):
+            continue
+        try:
+            client.deleteVolume(id=volume["id"])
+            deleted.append(name)
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    message = (f"No CloudStack instances were found for this job. Deleted {len(deleted)} leftover data volume(s) "
+               f"with your Owner tag.")
+    if errors:
+        message += " Issues: " + "; ".join(errors)
+    return {"terminated_instances": [], "deleted_volumes": deleted, "message": message}
+
+
 def terminate_job_resources(job_vars, platform_label):
     resources = list_job_resources(job_vars, platform_label)
     instances = resources.get("instances", [])
     if not instances:
-        return {"terminated_instances": [], "deleted_volumes": [], "message": "No CloudStack instances were found for this job."}
+        return _delete_leftover_volumes(job_vars)
     client = build_client(credentials_from_job_vars(job_vars), timeout=600)
 
     data_volumes = [item for item in resources.get("volumes", []) if item.get("volume_type") == "DATADISK"]

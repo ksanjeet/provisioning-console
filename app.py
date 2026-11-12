@@ -1477,10 +1477,13 @@ def inspect_azure_dashboard_scoped_v2(saved_credentials):
 OWNER_TAG_KEY = "Owner"
 
 
-def gcp_label_value(value):
-    """Value as stored in a Google Cloud label (same conversion as sap_vm_provision for GCP labels)."""
-    converted = str(value or "").lower().replace("@", "-at-")
-    return re.sub(r"[^a-z0-9_-]", "_", converted)[:63]
+gcp_label_value = gcp_support.label_value
+
+
+def job_owner(job_vars):
+    """Owner tag the job's resources were created with (empty for jobs without an Owner tag)."""
+    tags = job_vars.get("sap_vm_provision_resource_tags") if isinstance(job_vars, dict) else None
+    return str((tags or {}).get(OWNER_TAG_KEY) or "").strip() if isinstance(tags, dict) else ""
 
 
 def owner_tag_matches(platform, tags, owner):
@@ -2207,6 +2210,11 @@ LOAD_BALANCER_NAME_VARS = {
     "sap_vm_provision_ha_load_balancer_name_anydb": ("anydb_primary", "anydb"),
     "sap_vm_provision_ha_load_balancer_name_nwas": ("nwas_ascs", "nwas"),
 }
+PLACEMENT_NAME_VARS = {
+    "aws_ec2_vs": "sap_vm_provision_aws_placement_resource_name",
+    "msazure_vm": "sap_vm_provision_msazure_placement_resource_name",
+    "gcp_ce_vm": "sap_vm_provision_gcp_placement_resource_name",
+}
 # GCP resource names are limited to 63 characters; the longest suffix appended by the role is '-secondary-instance-group'
 LOAD_BALANCER_NAME_MAX_LENGTH = 38
 
@@ -2235,6 +2243,12 @@ def apply_unique_load_balancer_names(document, config):
                         if isinstance(spec, dict) and spec.get("sap_host_type") == host_type), None)
         if primary:
             document[variable] = _unique_load_balancer_name(sid, primary, kind)
+    # Placement groups / availability sets: the role default name is the same for every deployment
+    placement_variable = PLACEMENT_NAME_VARS.get(platform)
+    if placement_variable and placement_variable not in user_values and selected:
+        hosts = sorted(selected)
+        first = next((name for name in hosts if (selected[name] or {}).get("sap_host_type") == "hana_primary"), hosts[0])
+        document[placement_variable] = _unique_load_balancer_name(sid, first, "spread").replace("lb-", "pg-", 1)
     return document
 
 
@@ -2679,11 +2693,11 @@ def terminate_job_aws_resources(job_state):
     instance_ids = [item["instance_id"] for item in resources.get("instances", []) if item.get("instance_id")]
     volume_ids = [item["volume_id"] for item in resources.get("volumes", []) if item.get("volume_id") and not item.get("delete_on_termination")]
 
-    if not instance_ids:
-        return {"terminated_instances": [], "deleted_volumes": [], "message": "No active AWS instances were found for this job."}
-
     session = build_aws_session_from_vars(job_vars)
     ec2_client = session.client("ec2", region_name=job_vars.get("sap_vm_provision_aws_region"))
+
+    if not instance_ids:
+        return _delete_aws_leftover_volumes(ec2_client, job_vars)
     ec2_client.terminate_instances(InstanceIds=instance_ids)
     waiter = ec2_client.get_waiter("instance_terminated")
     waiter.wait(InstanceIds=instance_ids)
@@ -2701,6 +2715,35 @@ def terminate_job_aws_resources(job_state):
         "deleted_volumes": deleted_volumes,
         "message": f"Termination requested for {len(instance_ids)} instance(s). Deleted {len(deleted_volumes)} non-auto-delete volume(s).",
     }
+
+
+def _delete_aws_leftover_volumes(ec2_client, job_vars):
+    """Volumes of job instances deleted outside the console: only unattached volumes named <host>-vol_* that carry
+    the job's Owner tag."""
+    owner = job_owner(job_vars)
+    hostnames = extract_job_hostnames(job_vars)
+    if not owner or not hostnames:
+        return {"terminated_instances": [], "deleted_volumes": [],
+                "message": "No active AWS instances were found for this job."}
+    response = ec2_client.describe_volumes(Filters=[
+        {"Name": "tag:Name", "Values": [f"{host}-vol_*" for host in hostnames]},
+        {"Name": "status", "Values": ["available"]},
+    ])
+    deleted, errors = [], []
+    for volume in response.get("Volumes", []):
+        tags = {tag.get("Key"): tag.get("Value") for tag in volume.get("Tags", [])}
+        if not owner_tag_matches("aws_ec2_vs", tags, owner):
+            continue
+        try:
+            ec2_client.delete_volume(VolumeId=volume["VolumeId"])
+            deleted.append(volume["VolumeId"])
+        except Exception as exc:
+            errors.append(f"{volume['VolumeId']}: {exc}")
+    message = (f"No active AWS instances were found for this job. Deleted {len(deleted)} leftover volume(s) "
+               f"with your Owner tag.")
+    if errors:
+        message += " Issues: " + "; ".join(errors)
+    return {"terminated_instances": [], "deleted_volumes": deleted, "message": message}
 
 
 def _azure_clients(job_vars):
@@ -2787,6 +2830,14 @@ def terminate_job_azure_resources(job_state):
     resource_group = job_vars.get("sap_vm_provision_msazure_resource_group_name")
     compute, network = _azure_clients(job_vars)
     errors, terminated, deleted_volumes, deleted_other = [], [], [], []
+    owner = job_owner(job_vars)
+
+    def _owned(resource, label):
+        """Shared and leftover resources are deleted only with the job's Owner tag (jobs with an Owner tag)."""
+        if not owner or owner_tag_matches("msazure_vm", resource.tags or {}, owner):
+            return True
+        errors.append(f"{label} has no Owner tag '{owner}' and was kept")
+        return False
 
     # 1. Delete the job's VMs, remember their NICs and non-shared disks
     nic_names, disk_names = [], []
@@ -2843,20 +2894,38 @@ def terminate_job_azure_resources(job_state):
     for disk_name in disk_names:
         _delete_disk(disk_name)
 
-    # Shared HA resources (SBD disk, load balancer, availability set) are only cleaned up together with job VMs,
-    # so an empty load balancer or availability set of a deployment in progress is never removed
-    if not terminated:
+    # Without job VMs, resources are only cleaned up when they carry the job's Owner tag: then they are leftovers of
+    # this job (VMs deleted outside the console), never resources of other users with the same names
+    if not terminated and not owner:
         message = "No Azure VMs of this job were found; shared resources were not changed."
         if errors:
             message += " Issues: " + "; ".join(errors)
         return {"terminated_instances": [], "deleted_volumes": deleted_volumes, "message": message}
+
+    if not terminated:
+        nic_leftovers = {f"{host}-nic" for host in hostnames}
+        try:
+            for nic in network.network_interfaces.list(resource_group):
+                if nic.name in nic_leftovers and not nic.virtual_machine \
+                        and owner_tag_matches("msazure_vm", nic.tags or {}, owner):
+                    network.network_interfaces.begin_delete(resource_group, nic.name).result()
+                    deleted_other.append(f"nic:{nic.name}")
+            for disk in compute.disks.list_by_resource_group(resource_group):
+                if (disk.max_shares or 1) > 1 or not owner_tag_matches("msazure_vm", disk.tags or {}, owner):
+                    continue
+                if any(disk.name == host or disk.name.startswith((f"{host}-vol_", f"{host}_OsDisk", f"{host}-osdisk"))
+                       for host in hostnames):
+                    _delete_disk(disk.name)
+        except Exception as exc:
+            errors.append(f"Leftover NICs/disks: {exc}")
 
     # 3. SBD shared disks (fencing method sbd_shared_disk) whose hosts are all hosts of this job
     try:
         for disk in compute.disks.list_by_resource_group(resource_group):
             tags = disk.tags or {}
             owners = [host for host in tags.get("sap_vm_provision_hosts", "").split("_") if host]
-            if tags.get("sap_vm_provision") == "sbd" and owners and set(owners) <= set(hostnames):
+            if tags.get("sap_vm_provision") == "sbd" and owners and set(owners) <= set(hostnames) \
+                    and _owned(disk, f"SBD disk {disk.name}"):
                 _delete_disk(disk.name)
     except Exception as exc:
         errors.append(f"SBD shared disks: {exc}")
@@ -2878,6 +2947,8 @@ def terminate_job_azure_resources(job_state):
         if pools_in_use:
             errors.append(f"Load balancer {lb_name} still has backends ({', '.join(pools_in_use)}) and was kept")
             continue
+        if not _owned(lb, f"Load balancer {lb_name}"):
+            continue
         try:
             network.load_balancers.begin_delete(resource_group, lb_name).result()
             deleted_other.append(f"lb:{lb_name}")
@@ -2894,7 +2965,7 @@ def terminate_job_azure_resources(job_state):
             if not _azure_is_not_found(exc):
                 errors.append(f"Availability set {avset_name}: {exc}")
             continue
-        if avset.virtual_machines:
+        if avset.virtual_machines or not _owned(avset, f"Availability set {avset_name}"):
             continue
         try:
             compute.availability_sets.delete(resource_group, avset_name)

@@ -2,10 +2,11 @@ services:
   sap-wizard:
     build:
       context: .
-      # Local checkout of the community.sap_infrastructure collection (with the Apache CloudStack platform),
-      # installed into the image. Override with SAP_INFRASTRUCTURE_DIR=/path/to/community.sap_infrastructure
+      # community.sap_infrastructure collection with the Apache CloudStack platform, installed into the image.
+      # Default: the fork branch on GitHub (fetched by the build, no local checkout needed).
+      # For development with a local checkout: SAP_INFRASTRUCTURE_DIR=../community.sap_infrastructure (e.g. in .env)
       additional_contexts:
-        sap_infrastructure: ${SAP_INFRASTRUCTURE_DIR:-../community.sap_infrastructure}
+        sap_infrastructure: ${SAP_INFRASTRUCTURE_DIR:-https://github.com/ksanjeet/community.sap_infrastructure.git#feature/cloudstack_vm}
     ports:
       # Listens on localhost only by default. To reach the console from other machines set
       # SAP_WIZARD_PUBLISH_ADDRESS=0.0.0.0 and enable authentication (SAP_WIZARD_AUTH_USER / SAP_WIZARD_AUTH_PASSWORD).

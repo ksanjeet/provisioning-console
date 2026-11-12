@@ -1,5 +1,6 @@
 """Google Cloud support for console jobs: resource listing and teardown (Compute Engine REST API via google-auth)."""
 
+import re
 import time
 
 PLATFORM = "gcp_ce_vm"
@@ -11,6 +12,15 @@ LB_NAME_VARS = (
     "sap_vm_provision_ha_load_balancer_name_nwas",
 )
 HA_HOSTNAME_SUFFIX = "-ha"
+# Load balancer names of the role defaults are shared by all deployments that keep them: never deleted by teardown
+DEFAULT_LB_NAMES = {"lb-sap-ha-hana", "lb-sap-ha-anydb", "lb-sap-ha-nwas"}
+OWNER_TAG_KEY = "Owner"
+
+
+def label_value(value):
+    """Value as stored in a Google Cloud label (same conversion as sap_vm_provision for GCP labels)."""
+    converted = str(value or "").lower().replace("@", "-at-")
+    return re.sub(r"[^a-z0-9_-]", "_", converted)[:63]
 
 
 def build_session(credentials_path):
@@ -37,6 +47,10 @@ class GcpJob:
             self.region = (self.zone or "")[:-2]
         self.hosts = [host["name"] for host in planned_hosts]
         self.errors = []
+        tags = job_vars.get("sap_vm_provision_resource_tags") or {}
+        owner = next((value for key, value in tags.items() if str(key).lower() == OWNER_TAG_KEY.lower()), "") \
+            if isinstance(tags, dict) else ""
+        self.owner_label = label_value(owner) if owner else ""
 
     # --- REST helpers -------------------------------------------------------------------------------------------
     def get(self, url, **params):
@@ -82,7 +96,23 @@ class GcpJob:
         return found
 
     def load_balancer_names(self):
-        return [self.vars[var] for var in LB_NAME_VARS if self.vars.get(var)]
+        names = []
+        for var in LB_NAME_VARS:
+            name = self.vars.get(var)
+            if not name:
+                continue
+            if name in DEFAULT_LB_NAMES:
+                note = f"load balancer resources '{name}*' kept: default name shared by other deployments"
+                if note not in self.errors:
+                    self.errors.append(note)
+                continue
+            names.append(name)
+        return names
+
+    def owned(self, resource):
+        labels = resource.get("labels") or {}
+        return bool(self.owner_label) and any(
+            str(key).lower() == OWNER_TAG_KEY.lower() and value == self.owner_label for key, value in labels.items())
 
 
 def list_job_resources(job, platform_label):
@@ -163,9 +193,30 @@ def _delete_dns_records(job, deleted, host_names):
                     deleted.append(record)
 
 
+def _delete_leftovers(job):
+    """VMs of the job deleted outside the console: unattached disks <host>-vol-* with the job's Owner label and the
+    job's load balancer resources (unique names per deployment)."""
+    deleted_volumes, deleted = [], []
+    disks = (job.get(job.project_url(f"zones/{job.zone}/disks")) or {}).get("items") or []
+    for disk in disks:
+        if disk.get("users") or not job.owned(disk):
+            continue
+        if any(disk["name"] == host or disk["name"].startswith(f"{host}-vol-") for host in job.hosts):
+            if job.delete(disk["selfLink"], f"disk {disk['name']}"):
+                deleted_volumes.append(disk["name"])
+    _delete_load_balancers(job, deleted)
+    message = (f"No Google Cloud VMs of this job were found. Deleted {len(deleted_volumes)} leftover disk(s) with your "
+               f"Owner label and {len(deleted)} load balancer resource(s).")
+    if job.errors:
+        message += " Notes: " + "; ".join(job.errors)
+    return {"terminated_instances": [], "deleted_volumes": deleted_volumes + deleted, "message": message}
+
+
 def terminate_job_resources(job):
     instances = job.instances()
     if not instances:
+        if job.owner_label:
+            return _delete_leftovers(job)
         return {"terminated_instances": [], "deleted_volumes": [],
                 "message": "No Google Cloud VMs of this job were found; shared resources were not changed."}
     deleted = []

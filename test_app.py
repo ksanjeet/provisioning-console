@@ -559,7 +559,8 @@ class ConnectionInfoTests(unittest.TestCase):
 class AzureTeardownTests(unittest.TestCase):
     """terminate_job_azure_resources with fake Azure SDK clients."""
 
-    def _setup(self, extra_disks=(), lb_backends=False, sbd_hosts="hanaaz1_hanaaz2", sbd_attached=False):
+    def _setup(self, extra_disks=(), lb_backends=False, sbd_hosts="hanaaz1_hanaaz2", sbd_attached=False,
+               resource_owner=None, vms_exist=True):
         from types import SimpleNamespace as NS
 
         class NotFound(Exception):
@@ -573,12 +574,13 @@ class AzureTeardownTests(unittest.TestCase):
                                         data_disks=[NS(name=f"{name}-vol_hana0", managed_disk=NS(id=rid("disk", f"{name}-vol_hana0"))),
                                                     NS(name="sbd-hanaaz1", managed_disk=NS(id=rid("disk", "sbd-hanaaz1")))]))
             for name in ("hanaaz1", "hanaaz2")
-        }
-        disks = {f"{n}-{k}": NS(name=f"{n}-{k}", max_shares=1, managed_by=None, managed_by_extended=[], tags={})
+        } if vms_exist else {}
+        owner_tags = {"Owner": resource_owner} if resource_owner else {}
+        disks = {f"{n}-{k}": NS(name=f"{n}-{k}", max_shares=1, managed_by=None, managed_by_extended=[], tags=dict(owner_tags))
                  for n in ("hanaaz1", "hanaaz2") for k in ("os", "vol_hana0")}
         disks["sbd-hanaaz1"] = NS(name="sbd-hanaaz1", max_shares=2, managed_by=None,
                                   managed_by_extended=["vm"] if sbd_attached else [],
-                                  tags={"sap_vm_provision": "sbd", "sap_vm_provision_hosts": sbd_hosts})
+                                  tags={"sap_vm_provision": "sbd", "sap_vm_provision_hosts": sbd_hosts, **owner_tags})
         for disk in extra_disks:
             disks[disk.name] = disk
         done = NS(result=lambda: None)
@@ -594,14 +596,16 @@ class AzureTeardownTests(unittest.TestCase):
             disks=NS(get=lambda rg, name: get_or_404(disks, name),
                      list_by_resource_group=lambda rg: list(disks.values()),
                      begin_delete=lambda rg, name: (calls.append(("disk", name)), done)[1]),
-            availability_sets=NS(get=lambda rg, name: get_or_404({"sap-availability-set-spread-hana": NS(virtual_machines=[])}, name),
+            availability_sets=NS(get=lambda rg, name: get_or_404({"sap-availability-set-spread-hana": NS(virtual_machines=[], tags=dict(owner_tags))}, name),
                                  delete=lambda rg, name: calls.append(("avset", name))),
         )
         pool = NS(name="pool", backend_ip_configurations=[NS(id="x")] if lb_backends else [], load_balancer_backend_addresses=[])
         network = NS(
-            network_interfaces=NS(begin_delete=lambda rg, name: (calls.append(("nic", name)), done)[1]),
-            load_balancers=NS(get=lambda rg, name: get_or_404({"lb-sap-ha-hana": NS(backend_address_pools=[pool]),
-                                                               "chana-lb": NS(backend_address_pools=[])}, name),
+            network_interfaces=NS(begin_delete=lambda rg, name: (calls.append(("nic", name)), done)[1],
+                                  list=lambda rg: [NS(name=f"{n}-nic", virtual_machine=None, tags=dict(owner_tags))
+                                                   for n in ("hanaaz1", "hanaaz2", "otherhost")]),
+            load_balancers=NS(get=lambda rg, name: get_or_404({"lb-sap-ha-hana": NS(backend_address_pools=[pool], tags=dict(owner_tags)),
+                                                               "chana-lb": NS(backend_address_pools=[], tags={})}, name),
                               begin_delete=lambda rg, name: (calls.append(("lb", name)), done)[1]),
         )
         job_vars = {
@@ -655,6 +659,35 @@ class AzureTeardownTests(unittest.TestCase):
         self.assertEqual(result["terminated_instances"], [])
         self.assertIn("shared resources were not changed", result["message"])
 
+    def test_owner_tag_required_for_shared_resources(self):
+        calls, compute, network, job_vars = self._setup()  # resources without Owner tag
+        job_vars["sap_vm_provision_resource_tags"] = {"Owner": "me@example.com"}
+        result = self._run(compute, network, job_vars)
+        self.assertEqual(result["terminated_instances"], ["hanaaz1", "hanaaz2"])
+        self.assertNotIn(("lb", "lb-sap-ha-hana"), calls)
+        self.assertNotIn(("avset", "sap-availability-set-spread-hana"), calls)
+        self.assertNotIn(("disk", "sbd-hanaaz1"), calls)
+        self.assertIn("has no Owner tag", result["message"])
+        calls, compute, network, job_vars = self._setup(resource_owner="Me@Example.com")
+        job_vars["sap_vm_provision_resource_tags"] = {"Owner": "me@example.com"}
+        self._run(compute, network, job_vars)
+        self.assertIn(("lb", "lb-sap-ha-hana"), calls)
+        self.assertIn(("avset", "sap-availability-set-spread-hana"), calls)
+
+    def test_leftovers_of_deleted_vms_need_owner_tag(self):
+        calls, compute, network, job_vars = self._setup(resource_owner="me@example.com", vms_exist=False)
+        job_vars["sap_vm_provision_resource_tags"] = {"Owner": "me@example.com"}
+        result = self._run(compute, network, job_vars)
+        self.assertEqual(result["terminated_instances"], [])
+        self.assertIn(("nic", "hanaaz1-nic"), calls)
+        self.assertNotIn(("nic", "otherhost-nic"), calls)  # not a host of this job
+        self.assertIn(("disk", "hanaaz1-vol_hana0"), calls)
+        self.assertIn(("disk", "sbd-hanaaz1"), calls)
+        calls, compute, network, job_vars = self._setup(resource_owner="someone@else.com", vms_exist=False)
+        job_vars["sap_vm_provision_resource_tags"] = {"Owner": "me@example.com"}
+        self._run(compute, network, job_vars)
+        self.assertEqual([c for c in calls if c[0] in ("nic", "disk", "lb", "avset")], [])
+
 
 class ContainerPathTests(unittest.TestCase):
     def test_host_ssh_paths_are_mapped_to_container_mount(self):
@@ -694,6 +727,7 @@ class UniqueLoadBalancerNameTests(unittest.TestCase):
         document = console.build_generated_document(config)
         self.assertEqual(document["sap_vm_provision_ha_load_balancer_name_hana"], "lb-h01-hana-p-hana")
         self.assertNotIn("sap_vm_provision_ha_load_balancer_name_nwas", document)  # no ASCS host in this plan
+        self.assertEqual(document["sap_vm_provision_gcp_placement_resource_name"], "pg-h01-hana-p-spread")
 
     def test_yaml_override_wins(self):
         config = console.build_target_environment({
@@ -785,6 +819,31 @@ class GcpTeardownTests(unittest.TestCase):
         self.assertEqual(session.deleted, [])
         self.assertIn("were not changed", result["message"])
 
+    def test_default_load_balancer_names_are_never_deleted(self):
+        job, session = self._job({"instances/hanagcp1": self._instance("hanagcp1", "d1"),
+                                  "forwardingRules/lb-sap-ha-hana-fwd-rule": {}}, hosts=("hanagcp1",))
+        job.vars["sap_vm_provision_ha_load_balancer_name_hana"] = "lb-sap-ha-hana"
+        result = console.gcp_support.terminate_job_resources(job)
+        self.assertNotIn("lb-sap-ha-hana-fwd-rule", session.deleted)
+        self.assertIn("default name shared", result["message"])
+
+    def test_leftovers_need_owner_label(self):
+        disks = {"items": [
+            {"name": "hanagcp1-vol-hana0", "users": [], "labels": {"owner": "me-at-example_com"}, "selfLink": "https://x/disks/hanagcp1-vol-hana0"},
+            {"name": "hanagcp2-vol-hana0", "users": [], "labels": {"owner": "other"}, "selfLink": "https://x/disks/hanagcp2-vol-hana0"},
+            {"name": "hanagcp1-vol-usr0", "users": ["vm"], "labels": {"owner": "me-at-example_com"}, "selfLink": "https://x/disks/hanagcp1-vol-usr0"},
+        ]}
+        resources = {"zones/europe-west3-a/disks": disks, "forwardingRules/lb-h01-hanagcp1-hana-fwd-rule": {},
+                     "disks/hanagcp1-vol-hana0": {}, "disks/hanagcp2-vol-hana0": {}}
+        job, session = self._job(resources)
+        job.owner_label = "me-at-example_com"
+        result = console.gcp_support.terminate_job_resources(job)
+        self.assertIn("hanagcp1-vol-hana0", session.deleted)
+        self.assertNotIn("hanagcp2-vol-hana0", session.deleted)  # other owner
+        self.assertNotIn("hanagcp1-vol-usr0", session.deleted)  # attached
+        self.assertIn("lb-h01-hanagcp1-hana-fwd-rule", session.deleted)
+        self.assertEqual(result["terminated_instances"], [])
+
     def test_listing(self):
         job, _ = self._job({"instances/hanagcp1": self._instance("hanagcp1", "d1")}, hosts=("hanagcp1",))
         result = console.gcp_support.list_job_resources(job, "GCP")
@@ -850,3 +909,62 @@ class OwnerTagTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeftoverTeardownTests(unittest.TestCase):
+    """Teardown of jobs whose VMs were deleted outside the console: only resources with the job's Owner tag."""
+
+    def test_aws_leftover_volumes(self):
+        class FakeEc2:
+            deleted = []
+
+            def describe_volumes(self, Filters):
+                self.filters = Filters
+                return {"Volumes": [
+                    {"VolumeId": "vol-mine", "Tags": [{"Key": "Name", "Value": "hana-p-vol_hana0"}, {"Key": "Owner", "Value": "me@example.com"}]},
+                    {"VolumeId": "vol-other", "Tags": [{"Key": "Name", "Value": "hana-p-vol_hana0"}, {"Key": "Owner", "Value": "x@y.z"}]},
+                    {"VolumeId": "vol-untagged", "Tags": [{"Key": "Name", "Value": "hana-p-vol_hana0"}]},
+                ]}
+
+            def delete_volume(self, VolumeId):
+                self.deleted.append(VolumeId)
+
+        ec2 = FakeEc2()
+        job_vars = {"sap_vm_provision_resource_tags": {"Owner": "me@example.com"}}
+        with patch.object(console, "extract_job_hostnames", return_value=["hana-p", "hana-s"]):
+            result = console._delete_aws_leftover_volumes(ec2, job_vars)
+            self.assertEqual(ec2.deleted, ["vol-mine"])
+            self.assertIn({"Name": "status", "Values": ["available"]}, ec2.filters)
+            ec2.deleted.clear()
+            result = console._delete_aws_leftover_volumes(ec2, {})  # job without Owner tag
+            self.assertEqual(ec2.deleted, [])
+        self.assertIn("No active AWS instances", result["message"])
+
+    def test_cloudstack_leftover_volumes(self):
+        class FakeClient:
+            deleted = []
+
+            def deleteVolume(self, id):
+                self.deleted.append(id)
+
+        volumes = [
+            {"id": "1", "name": "hanaha1-vol_hana0", "tags": [{"key": "Owner", "value": "me@example.com"}]},
+            {"id": "2", "name": "hanaha1-vol_hana1", "virtualmachineid": "vm", "tags": [{"key": "Owner", "value": "me@example.com"}]},
+            {"id": "3", "name": "hanaha2-vol_hana0", "tags": [{"key": "Owner", "value": "x@y.z"}]},
+            {"id": "4", "name": "other-vol_hana0", "tags": [{"key": "Owner", "value": "me@example.com"}]},
+        ]
+        client = FakeClient()
+        cs = console.cloudstack_support
+        job_vars = {"sap_vm_provision_resource_tags": {"Owner": "me@example.com"}}
+        with (
+            patch.object(cs, "_job_hostnames", return_value=["hanaha1", "hanaha2"]),
+            patch.object(cs, "build_client", return_value=client),
+            patch.object(cs, "credentials_from_job_vars", return_value={}),
+            patch.object(cs, "_list", return_value=volumes),
+        ):
+            result = cs._delete_leftover_volumes(job_vars)
+            self.assertEqual(client.deleted, ["1"])
+            self.assertEqual(result["deleted_volumes"], ["hanaha1-vol_hana0"])
+            client.deleted.clear()
+            cs._delete_leftover_volumes({})
+            self.assertEqual(client.deleted, [])

@@ -100,13 +100,20 @@ cp sample-inputs/sap_hana_ha_aws_test_32gb.template.json sample-inputs/sap_hana_
 Replace all `ENTER_*` placeholders in the local copy, adjust the example defaults to your deployment, and upload that copy to the wizard. Files named `*.local.json` are excluded from Git and Docker build contexts; keep them in an encrypted backup if needed. Do not put real values in the tracked template or force-add private input files. Use provider configuration for cloud credentials.
 
 #### Portable containerized web UI
-To freeze the UI and its automation dependencies, this repository now includes a pinned container build:
+To freeze the UI and its automation dependencies, this repository now includes a pinned container build. On a new machine you only need Docker (with Compose v2 and BuildKit) and this repository:
 
 ```bash
+git clone -b feature/cloudstack-console https://github.com/ksanjeet/provisioning-console.git
+cd provisioning-console
 docker compose up --build
 ```
 
-Then open http://localhost:5000.
+Then open http://localhost:5000. The build fetches the `community.sap_infrastructure` collection with the Apache CloudStack platform from the fork branch `feature/cloudstack_vm` on GitHub; no other checkout is needed.
+
+First steps in the UI:
+1. Open the provider card of your platform (AWS, Google Cloud, Microsoft Azure or Apache CloudStack) and use *Configure provider*. The connection settings of each platform are on their own tab. Set your e-mail or user ID as *Owner tag*.
+2. Run the wizard, or load a wizard input file (examples in [sample-inputs/](sample-inputs)) and add the secrets that are never stored in these files.
+3. Follow the job; when it has finished, the job page shows how to connect to the hosts and offers *Terminate* to delete the resources of the job.
 
 By default the console listens on `127.0.0.1` only. To use it from another machine, publish it on all interfaces and enable authentication, for example in a `.env` file next to `compose.yml`:
 
@@ -140,8 +147,12 @@ Important notes when running in the container:
 - If your playbooks reference SSH keys or media files, mount them into the container and enter the container path in the UI (for example `/mnt/ssh/id_rsa`).
 - Owner tag: set your e-mail or user ID as *Owner tag* in each provider's connection settings. Provisioned VMs are tagged `Owner=<value>` (on Google Cloud as label `owner`, e.g. `user_name-at-example_com`), and the provider inventory lists and allows deleting only VMs with your Owner tag. Without an Owner tag the inventory is read-only.
 - High Availability load balancer resources (GCP, MS Azure, IBM Cloud) get unique names per deployment, `lb-<sid>-<primary host>-hana|anydb|nwas`, so several deployments can share a project or subscription. Set `sap_vm_provision_ha_load_balancer_name_hana` (or `_anydb`, `_nwas`) in the YAML override to choose your own.
-- Apache CloudStack: save the API URL, key and secret in the CloudStack provider card. Only credentials entered in the UI (or `CLOUDSTACK_*` environment variables passed to the container) are used.
-- The image build installs `community.sap_infrastructure` (with the Apache CloudStack platform) from the build context `sap_infrastructure`, by default the sibling checkout `../community.sap_infrastructure` (override with `SAP_INFRASTRUCTURE_DIR`). The source is bind-mounted during the build and not stored in image layers.
+- Apache CloudStack: prepare the zone once as described in [tools/cloudstack/README.md](tools/cloudstack/README.md) (template, KVM CPU model, offerings, fencing). Save the API URL, key and secret in the CloudStack provider card. Only credentials entered in the UI (or `CLOUDSTACK_*` environment variables passed to the container) are used.
+- Resources created with the VMs are tagged with the Owner tag as well where the platform allows it: AWS EBS volumes, network interfaces and placement groups; MS Azure OS and data disks, SBD shared disks, network interfaces, load balancers and availability sets; Google Cloud data disks; Apache CloudStack root and data volumes. Not taggable by the automation: Google Cloud boot disks, static IP addresses, forwarding rules, health checks, backend services and instance groups (unique names per deployment instead), AWS route table entries, IAM roles shared by all HA deployments of an AWS account, CloudStack affinity groups and LINSTOR SBD resources.
+- *Terminate* deletes only resources of the job: its VMs (found by host name and created by the automation), their disks and network interfaces, and HA resources with the job's unique names. Shared HA resources (MS Azure load balancers, availability sets and SBD disks) are deleted only with the job's Owner tag. Load balancer resources with the role default names (`lb-sap-ha-*`), which other deployments may use, are never deleted. If the VMs were already deleted outside the console, leftover disks and network interfaces named after the job's hosts are deleted only when they carry the job's Owner tag.
+- Placement groups (AWS), availability sets (MS Azure) and placement policies (Google Cloud) also get unique names per deployment, `pg-<sid>-<primary host>-spread`.
+- AWS HA scenarios create or update the IAM role `HA-Role-Pacemaker`, its policies and the instance profile `HA-Instance-Profile-Pacemaker-Cluster`, which requires IAM permissions (e.g. not available with the *PowerUserAccess* permission set). Without them, let an administrator create the role and instance profile once and add `sap_vm_provision_aws_ha_iam_manage: false` to the YAML override; `iam:PassRole` on the role is still required.
+- The image build installs `community.sap_infrastructure` (with the Apache CloudStack platform) from the build context `sap_infrastructure`: by default the fork branch on GitHub, for development a local checkout with `SAP_INFRASTRUCTURE_DIR=../community.sap_infrastructure` (e.g. in `.env`). The source is bind-mounted during the build and not stored in image layers.
 
 ### Ansible with existing host(s)
 This method is used to install the SAP system on an existing host(s).  
