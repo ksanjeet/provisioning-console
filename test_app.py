@@ -685,5 +685,92 @@ class UniqueLoadBalancerNameTests(unittest.TestCase):
         self.assertEqual(document["sap_vm_provision_ha_load_balancer_name_hana"], "my-lb")
 
 
+class GcpTeardownTests(unittest.TestCase):
+    class FakeResponse:
+        def __init__(self, status=200, body=None):
+            self.status_code, self._body = status, body or {}
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    class FakeSession:
+        def __init__(self, resources):
+            self.resources = resources  # url-suffix -> body
+            self.deleted = []
+
+        def _find(self, url):
+            return next((v for k, v in self.resources.items() if url.endswith(k)), None)
+
+        def get(self, url, params=None, timeout=None):
+            if "managedZones" in url and url.endswith("managedZones"):
+                return GcpTeardownTests.FakeResponse(body={"managedZones": [{"name": "zone1"}]})
+            body = self._find(url)
+            return GcpTeardownTests.FakeResponse(404) if body is None else GcpTeardownTests.FakeResponse(body=body)
+
+        def delete(self, url, timeout=None):
+            body = self._find(url)
+            if body is None and "/rrsets/" not in url:
+                return GcpTeardownTests.FakeResponse(404)
+            self.deleted.append(url.rsplit("/", 1)[-1] if "/rrsets/" not in url else url.split("/rrsets/")[1])
+            return GcpTeardownTests.FakeResponse(body={"status": "DONE", "selfLink": url + "/op"})
+
+    def _job(self, resources, hosts=("hanagcp1", "hanagcp2")):
+        job_vars = {
+            "sap_vm_provision_gcp_project": "p1", "sap_vm_provision_gcp_region_zone": "europe-west3-a",
+            "sap_vm_provision_ha_load_balancer_name_hana": "lb-h01-hanagcp1-hana",
+            "sap_vm_provision_dns_root_domain": "sap.internal",
+        }
+        session = self.FakeSession(resources)
+        job = console.gcp_support.GcpJob(job_vars, session, [{"name": h} for h in hosts])
+        return job, session
+
+    def _instance(self, name, data_disk):
+        return {"name": name, "status": "RUNNING", "networkInterfaces": [{"networkIP": "10.0.0.4"}],
+                "disks": [{"source": f"https://x/zones/z/disks/{name}", "autoDelete": True},
+                          {"source": f"https://x/zones/z/disks/{data_disk}", "autoDelete": False}]}
+
+    def test_terminate_deletes_job_resources_and_keeps_shared_health_check(self):
+        resources = {
+            "instances/hanagcp1": self._instance("hanagcp1", "hanagcp1-vol-hana0"),
+            "instances/hanagcp2": self._instance("hanagcp2", "hanagcp2-vol-hana0"),
+            "disks/hanagcp1-vol-hana0": {"name": "hanagcp1-vol-hana0", "users": []},
+            "disks/hanagcp2-vol-hana0": {"name": "hanagcp2-vol-hana0", "users": ["https://x/instances/other"]},
+            "forwardingRules/lb-h01-hanagcp1-hana-fwd-rule": {},
+            "backendServices/lb-h01-hanagcp1-hana-backend-service": {},
+            "instanceGroups/lb-h01-hanagcp1-hana-primary-instance-group": {},
+            "instanceGroups/lb-h01-hanagcp1-hana-secondary-instance-group": {},
+            "addresses/lb-h01-hanagcp1-hana-reserved-static-ip-vip": {},
+            "global/healthChecks/lb-h01-hanagcp1-hana-probe-hc-vip": {},
+            "aggregated/backendServices": {"items": {"regions/europe-west1": {"backendServices": [
+                {"healthChecks": ["https://x/global/healthChecks/lb-h01-hanagcp1-hana-probe-hc-vip"]}]}}},
+        }
+        job, session = self._job(resources)
+        result = console.gcp_support.terminate_job_resources(job)
+        self.assertEqual(result["terminated_instances"], ["hanagcp1", "hanagcp2"])
+        for name in ("lb-h01-hanagcp1-hana-fwd-rule", "lb-h01-hanagcp1-hana-backend-service",
+                     "lb-h01-hanagcp1-hana-primary-instance-group", "lb-h01-hanagcp1-hana-reserved-static-ip-vip",
+                     "hanagcp1-vol-hana0", "hanagcp1.sap.internal./A", "hanagcp1-ha.sap.internal./A"):
+            self.assertIn(name, session.deleted)
+        self.assertNotIn("lb-h01-hanagcp1-hana-probe-hc-vip", session.deleted)  # still used elsewhere
+        self.assertNotIn("hanagcp2-vol-hana0", session.deleted)  # still attached
+        self.assertIn("kept", result["message"])
+
+    def test_nothing_deleted_when_no_job_vm_exists(self):
+        job, session = self._job({"forwardingRules/lb-h01-hanagcp1-hana-fwd-rule": {}}, hosts=("other1",))
+        result = console.gcp_support.terminate_job_resources(job)
+        self.assertEqual(session.deleted, [])
+        self.assertIn("were not changed", result["message"])
+
+    def test_listing(self):
+        job, _ = self._job({"instances/hanagcp1": self._instance("hanagcp1", "d1")}, hosts=("hanagcp1",))
+        result = console.gcp_support.list_job_resources(job, "GCP")
+        self.assertEqual(result["instances"][0]["private_ip"], "10.0.0.4")
+        self.assertEqual(len(result["volumes"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

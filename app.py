@@ -22,6 +22,7 @@ from urllib.parse import quote
 import yaml
 import cloudstack_support
 import connection_info
+import gcp_support
 from flask import Flask, abort, jsonify, redirect, render_template, request, url_for
 from container.apply_collection_patches import (
     HSR_COMMAND_ENVIRONMENT,
@@ -2842,6 +2843,30 @@ def terminate_job_azure_resources(job_state):
     return {"terminated_instances": terminated, "deleted_volumes": deleted_volumes, "message": message}
 
 
+def _gcp_job(job_state):
+    generated_vars_path = job_state.get("generated_file")
+    job_vars = load_generated_vars(generated_vars_path) if generated_vars_path else {}
+    if job_vars.get("sap_vm_provision_iac_platform") != "gcp_ce_vm":
+        return None
+    credentials_path = to_container_path(job_vars.get("sap_vm_provision_gcp_credentials_json", ""))
+    session = gcp_support.build_session(Path(credentials_path).expanduser())
+    return gcp_support.GcpJob(job_vars, session, connection_info._planned_hosts(job_vars))
+
+
+def list_job_gcp_resources(job_state):
+    job = _gcp_job(job_state)
+    if job is None:
+        return {"platform": None, "instances": [], "volumes": [], "message": "No Google Cloud generated vars file recorded for this job."}
+    return gcp_support.list_job_resources(job, PLATFORM_LABELS.get("gcp_ce_vm", "GCP Compute Engine"))
+
+
+def terminate_job_gcp_resources(job_state):
+    job = _gcp_job(job_state)
+    if job is None:
+        return {"terminated_instances": [], "deleted_volumes": [], "message": "No Google Cloud generated vars file recorded for this job."}
+    return gcp_support.terminate_job_resources(job)
+
+
 def build_job_connection_info(job_state):
     generated_vars_path = job_state.get("generated_file")
     job_vars = load_generated_vars(generated_vars_path) if generated_vars_path else {}
@@ -2879,6 +2904,7 @@ def list_job_resources(job_state):
     resource_handlers = {
         "aws_ec2_vs": list_job_aws_resources,
         "msazure_vm": list_job_azure_resources,
+        "gcp_ce_vm": list_job_gcp_resources,
         "cloudstack_vm": list_job_cloudstack_resources,
     }
     handler = resource_handlers.get(platform)
@@ -2899,6 +2925,7 @@ def terminate_job_resources_for_platform(job_state):
     terminate_handlers = {
         "aws_ec2_vs": terminate_job_aws_resources,
         "msazure_vm": terminate_job_azure_resources,
+        "gcp_ce_vm": terminate_job_gcp_resources,
         "cloudstack_vm": terminate_job_cloudstack_resources,
     }
     handler = terminate_handlers.get(platform)
