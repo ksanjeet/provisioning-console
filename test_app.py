@@ -385,6 +385,12 @@ class CloudStackPlatformTests(unittest.TestCase):
         self.assertEqual(deleted, ["http://linstor:3370/v1/resource-definitions/sbd-hanahost1"])
         self.assertIn("sbd-hanahost1", result["message"])
 
+    def test_media_download_directory_is_persistent_for_all_platforms(self):
+        for platform in ("cloudstack_vm", "msazure_vm", "gcp_ce_vm", "aws_ec2_vs"):
+            with self.subTest(platform=platform):
+                overrides = sanitize_overrides({**self.base_config, "platform": platform})
+                self.assertEqual(overrides["sap_software_download_execution_node_directory"], str(console.STATE_DIR / "sap_media"))
+
     def test_landing_page_offers_cloudstack(self):
         with (
             patch.object(console, "check_dependencies", return_value=[]),

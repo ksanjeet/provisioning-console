@@ -2222,6 +2222,9 @@ def sanitize_overrides(config):
         "sap_swpm_db_system_password": system_password,
         "sap_swpm_db_systemdb_password": system_password,
         "sap_hana_install_use_master_password": "y",
+        # Media downloaded in the console (sap_software_download_on_execution_node) is kept in the persistent
+        # state directory and reused by later jobs, instead of the container's writable layer
+        "sap_software_download_execution_node_directory": str(STATE_DIR / "sap_media"),
         "sap_hana_install_log_mode": (
             "normal" if "ha" in (config.get("scenario") or "").split("_") else "overwrite"
         ),
@@ -2287,8 +2290,6 @@ def sanitize_overrides(config):
             "sap_vm_provision_cloudstack_ha_sbd_devices": cloudstack_support.parse_sbd_devices(config.get("cloudstack_ha_sbd_devices")) or None,
             "sap_vm_provision_cloudstack_kvm_host_ssh_user": config.get("cloudstack_kvm_host_ssh_user"),
             "sap_vm_provision_cloudstack_kvm_host_ssh_private_key_file_path": config.get("cloudstack_kvm_host_ssh_private_key_file"),
-            # CloudStack Guest Networks often have no Internet access: download SAP media in the console, then copy
-            "sap_software_download_execution_node_directory": str(STATE_DIR / "sap_media"),
             "sap_vm_provision_dns_root_domain": config.get("dns_root_domain"),
         })
 
