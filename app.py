@@ -678,6 +678,38 @@ def _read_aws_cli_profile(profile_name="default"):
     return credentials
 
 
+CONTAINER_SSH_DIR = "/mnt/ssh"
+# Wizard and provider profile fields holding paths of key or credential files
+PATH_FIELDS = (
+    "gcp_credentials_json",
+    "host_ssh_private_key_file",
+    "bastion_private_key_file",
+    "cloudstack_kvm_host_ssh_private_key_file",
+)
+
+
+def to_container_path(path):
+    """Map a path of the Docker host SSH directory (SAP_SSH_DIR, e.g. /home/user/.ssh/key or ~/.ssh/key)
+    to its mount point in the container (/mnt/ssh/key). Other paths are returned unchanged."""
+    if not isinstance(path, str) or not path.strip():
+        return path
+    value = path.strip()
+    if not Path(CONTAINER_SSH_DIR).is_dir():
+        return value  # not running in the container
+    host_ssh_dir = os.environ.get("SAP_SSH_DIR_HOST", "").rstrip("/")
+    for prefix in filter(None, [host_ssh_dir, "~/.ssh", "$HOME/.ssh"]):
+        if value == prefix or value.startswith(prefix + "/"):
+            return CONTAINER_SSH_DIR + value[len(prefix):]
+    return value
+
+
+def _normalize_path_fields(values):
+    for key in PATH_FIELDS:
+        if key in values:
+            values[key] = to_container_path(values[key])
+    return values
+
+
 def discover_saved_credentials():
     merged = {}
 
@@ -701,6 +733,8 @@ def discover_saved_credentials():
         if isinstance(values, dict) and platform not in merged:
             merged[platform] = values
 
+    for values in merged.values():
+        _normalize_path_fields(values)
     return merged
 
 
@@ -812,6 +846,7 @@ def save_provider_profile(platform, payload):
         elif key in existing:
             existing.pop(key, None)
 
+    _normalize_path_fields(existing)
     missing = [key for key in required_fields if not existing.get(key)]
     if missing:
         raise ValueError("Missing required field(s): {}.".format(", ".join(missing)))
@@ -1071,7 +1106,9 @@ def inspect_gcp_dashboard(saved_credentials):
             "gcp",
             "error",
             "GCP credentials file is missing.",
-            [f"Expected file: {credentials_path}"],
+            [f"Expected file: {credentials_path}",
+             f"The console runs in a container: put the key into the directory mounted as SAP_SSH_DIR and use "
+             f"{CONTAINER_SSH_DIR}/<file name> (host paths of that directory are translated automatically)."],
         )
 
     try:
@@ -1562,6 +1599,8 @@ def build_target_environment(data):
             payload[key] = value.strip()
         else:
             payload[key] = value
+
+    _normalize_path_fields(payload)
 
     raw_yaml_override = payload.get("yaml_override", "")
     if raw_yaml_override:
@@ -2089,7 +2128,47 @@ def build_generated_document(config):
     for key, value in sanitize_overrides(config).items():
         if value is not None:
             output[key] = value
-    return apply_platform_configuration_overrides(output, config)
+    output = apply_platform_configuration_overrides(output, config)
+    return apply_unique_load_balancer_names(output, config)
+
+
+# Load balancer resources (health check, backend service/pool, instance groups, VIP address, forwarding rule) are named
+# from these variables on GCP, MS Azure and IBM Cloud. The role defaults (lb-sap-ha-*) are identical for every deployment
+# and collide in shared projects/subscriptions (e.g. GCP health checks are global), so each deployment gets its own names.
+LOAD_BALANCER_NAME_VARS = {
+    "sap_vm_provision_ha_load_balancer_name_hana": ("hana_primary", "hana"),
+    "sap_vm_provision_ha_load_balancer_name_anydb": ("anydb_primary", "anydb"),
+    "sap_vm_provision_ha_load_balancer_name_nwas": ("nwas_ascs", "nwas"),
+}
+# GCP resource names are limited to 63 characters; the longest suffix appended by the role is '-secondary-instance-group'
+LOAD_BALANCER_NAME_MAX_LENGTH = 38
+
+
+def _unique_load_balancer_name(sid, hostname, kind):
+    clean = lambda value: re.sub(r"[^a-z0-9-]+", "-", str(value or "").lower()).strip("-")
+    sid_part = clean(sid) or "sap"
+    suffix = f"-{kind}"
+    host_budget = LOAD_BALANCER_NAME_MAX_LENGTH - len("lb-") - len(sid_part) - 1 - len(suffix)
+    host_part = clean(hostname)[:max(host_budget, 0)].strip("-") or "host"
+    return f"lb-{sid_part}-{host_part}{suffix}"
+
+
+def apply_unique_load_balancer_names(document, config):
+    platform = config.get("platform")
+    host_specs = document.get(get_host_specification_variable_name(platform)) if platform else None
+    selected = host_specs.get(config.get("host_plan"), {}) if isinstance(host_specs, dict) else {}
+    if not isinstance(selected, dict):
+        selected = {}
+    user_values = config.get("_yaml_override_values") or {}
+    sid = config.get("hana_sid") or config.get("sid")
+    for variable, (host_type, kind) in LOAD_BALANCER_NAME_VARS.items():
+        if variable in user_values:
+            continue  # explicit value from the YAML override wins
+        primary = next((name for name, spec in selected.items()
+                        if isinstance(spec, dict) and spec.get("sap_host_type") == host_type), None)
+        if primary:
+            document[variable] = _unique_load_balancer_name(sid, primary, kind)
+    return document
 
 
 def update_template_with_overrides(template_path, overrides):

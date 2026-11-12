@@ -636,5 +636,54 @@ class AzureTeardownTests(unittest.TestCase):
         self.assertIn("shared resources were not changed", result["message"])
 
 
+class ContainerPathTests(unittest.TestCase):
+    def test_host_ssh_paths_are_mapped_to_container_mount(self):
+        with (
+            patch.object(console.Path, "is_dir", return_value=True),
+            patch.dict(console.os.environ, {"SAP_SSH_DIR_HOST": "/home/user/.ssh"}),
+        ):
+            self.assertEqual(console.to_container_path("/home/user/.ssh/gcp-sa.json"), "/mnt/ssh/gcp-sa.json")
+            self.assertEqual(console.to_container_path("~/.ssh/id_rsa"), "/mnt/ssh/id_rsa")
+            self.assertEqual(console.to_container_path("/mnt/ssh/key"), "/mnt/ssh/key")
+            self.assertEqual(console.to_container_path("/home/user/.sshother/key"), "/home/user/.sshother/key")
+            self.assertEqual(console.to_container_path("/srv/keys/key"), "/srv/keys/key")
+            values = console._normalize_path_fields({"gcp_credentials_json": "/home/user/.ssh/a.json", "sid": "H01"})
+            self.assertEqual(values, {"gcp_credentials_json": "/mnt/ssh/a.json", "sid": "H01"})
+
+    def test_paths_unchanged_outside_container(self):
+        with patch.object(console.Path, "is_dir", return_value=False):
+            self.assertEqual(console.to_container_path("/home/user/.ssh/a.json"), "/home/user/.ssh/a.json")
+
+
+class UniqueLoadBalancerNameTests(unittest.TestCase):
+    def test_names_are_unique_per_deployment_and_valid_for_gcp(self):
+        name = console._unique_load_balancer_name("H01", "hanagcp1", "hana")
+        self.assertEqual(name, "lb-h01-hanagcp1-hana")
+        long_name = console._unique_load_balancer_name("H01", "a-very-long-primary-hostname-for-testing", "nwas")
+        self.assertLessEqual(len(long_name), console.LOAD_BALANCER_NAME_MAX_LENGTH)
+        self.assertLessEqual(len(long_name + "-secondary-instance-group"), 63)
+        self.assertRegex(long_name, r"^[a-z][a-z0-9-]*[a-z0-9]$")
+        self.assertNotEqual(console._unique_load_balancer_name("H01", "hostA", "hana"),
+                            console._unique_load_balancer_name("H02", "hostA", "hana"))
+
+    def test_generated_document_sets_names_from_primary_host(self):
+        config = {
+            "scenario": "sap_hana_ha", "media_dir": "/software", "iac_type": "ansible", "platform": "gcp_ce_vm",
+            "host_plan": "xsmall_256gb", "sid": "H01", "hana_sid": "H01", "product": "p", "sap_id_user": "u",
+        }
+        document = console.build_generated_document(config)
+        self.assertEqual(document["sap_vm_provision_ha_load_balancer_name_hana"], "lb-h01-hana-p-hana")
+        self.assertNotIn("sap_vm_provision_ha_load_balancer_name_nwas", document)  # no ASCS host in this plan
+
+    def test_yaml_override_wins(self):
+        config = console.build_target_environment({
+            "scenario": "sap_hana_ha", "media_dir": "/software", "iac_type": "ansible", "platform": "gcp_ce_vm",
+            "host_plan": "xsmall_256gb", "sid": "H01", "product": "p", "sap_id_user": "u",
+            "yaml_override": "sap_vm_provision_ha_load_balancer_name_hana: my-lb\n",
+        })
+        document = console.build_generated_document(config)
+        self.assertEqual(document["sap_vm_provision_ha_load_balancer_name_hana"], "my-lb")
+
+
 if __name__ == "__main__":
     unittest.main()

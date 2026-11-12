@@ -6,6 +6,14 @@
 sap_ha_pacemaker_cluster_gcp_project: "{{ sap_vm_provision_gcp_project }}"
 sap_ha_pacemaker_cluster_gcp_region_zone: "{{ sap_vm_provision_gcp_region_zone }}"
 
+# SLES for SAP images install classic SAPHanaSR, replace it with SAPHanaSR-angi before the cluster setup
+sap_ha_pacemaker_cluster_saphanasr_angi_force: true
+
+# Outbound access: the SAP hosts have no public IP and need egress, e.g. Cloud NAT on the VPC Subnet.
+# Cloud NAT defaults (64 ports per VM, TCP TIME_WAIT 120s) are exhausted by the SUSE PAYG registration (registercloudguest),
+# which then fails with timeouts / invalid repository credentials. Use e.g.:
+#   gcloud compute routers nats update NAT --router=ROUTER --region=REGION --min-ports-per-vm=2048 --tcp-time-wait-timeout=30s
+
 
 #### Bastion server details ####
 # Bastion variables are used when sap_vm_provision_bastion_execution is set to `true`
@@ -218,6 +226,9 @@ sap_vm_provision_gcp_ce_vm_host_os_image_dictionary:
   sles-15-6-sap-ha:
     project: "suse-sap-cloud"
     family: "sles-15-sp6-sap"
+  sles-15-7-sap-ha:
+    project: "suse-sap-cloud"
+    family: "sles-15-sp7-sap"
   sles-12-5-sap-ha-byos:
     project: "suse-byos-cloud"
     family: "sles-12-sp5-sap-byos"
