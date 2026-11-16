@@ -30,6 +30,7 @@ The Ansible Playbooks for SAP offer several key benefits:
 - OVirt (e.g. Red Hat Enterprise Linux KVM)
 - KubeVirt (e.g. Red Hat OpenShift Virtualization, SUSE Rancher with Harvester HCI) `[Experimental]`
 - VMware vSphere Virtual Machines `[Beta]`
+- Apache CloudStack Virtual Machines (KVM, XenServer/XCP-ng, VMware hypervisors) `[Beta]`
 - Existing hosts without provisioning
 
 ### Supported Deployment Scenarios
@@ -78,8 +79,55 @@ The explanation of Deployment Topologies:
 The playbooks can be executed with one of following methods.
 
 ### Guided web UI (recommended)
-This repository includes a simple web console that asks the minimum set of inputs, validates them, generates the Ansible extra vars file, and then runs the selected automation with live log output.
+The provisioning console is a web UI that provisions SAP systems with these playbooks without editing variable files.
 
+What it does:
+- **Provider connections:** one tab per platform (AWS, Google Cloud, Microsoft Azure, Apache CloudStack) for the
+  connection settings and your *Owner tag* (e-mail or user ID). The dashboard shows the VMs of each platform that carry
+  your Owner tag and lets you delete them.
+- **Wizard:** choose the scenario, platform and host plan, enter the SAP and network inputs, add an optional YAML
+  override for any playbook variable, and run the preflight checks. Inputs can be loaded from and saved to a JSON file;
+  saved files never contain passwords, secrets or keys. Examples: [sample-inputs/](sample-inputs).
+- **Jobs:** live log of the playbook run, the SSH connection details of the provisioned hosts (including an SSH config
+  snippet), and *Terminate* to delete the resources of the job.
+- **SAP installation media:** either from a directory you provide, or downloaded with your SAP S-user during the run.
+
+#### Run the container image
+```bash
+mkdir -p container-data media
+docker run -d --name sap-wizard -p 127.0.0.1:5000:5000 \
+  -e SAP_WIZARD_STATE_DIR=/var/lib/sap-wizard \
+  -e SAP_SSH_DIR_HOST=$HOME/.ssh \
+  -v $PWD/container-data:/var/lib/sap-wizard \
+  -v $HOME/.ssh:/mnt/ssh:ro \
+  -v $PWD/media:/mnt/media:ro \
+  ghcr.io/ksanjeet/provisioning-console:latest
+```
+Then open http://localhost:5000.
+
+#### Build and run with Docker Compose
+Requires Docker with Compose v2 and BuildKit:
+```bash
+git clone -b feature/cloudstack-console https://github.com/ksanjeet/provisioning-console.git
+cd provisioning-console
+docker compose up --build
+```
+The build fetches the `community.sap_infrastructure` collection with the Apache CloudStack platform from its GitHub
+fork branch. Settings can be placed in a `.env` file next to [compose.yml](compose.yml):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SAP_WIZARD_PUBLISH_ADDRESS` | `127.0.0.1` | Address the console is published on; `0.0.0.0` to reach it from other machines (enable authentication then) |
+| `SAP_WIZARD_PUBLISH_PORT` | `5000` | Published port |
+| `SAP_WIZARD_AUTH_USER`, `SAP_WIZARD_AUTH_PASSWORD` | empty | HTTP basic authentication for the console |
+| `SAP_SSH_DIR` | `./ssh` | Host directory with SSH keys, mounted read-only to `/mnt/ssh` |
+| `SAP_MEDIA_DIR` | `./media` | Host directory with SAP installation media, mounted read-only to `/mnt/media` |
+| `FLASK_SECRET_KEY` | generated | Session key; generated once and stored in the state directory when empty |
+| `SAP_INFRASTRUCTURE_DIR` | GitHub fork branch | Build context of the `community.sap_infrastructure` collection, e.g. a local checkout for development |
+
+#### Run without a container
+Requires Python 3.11, Ansible, the collections of [container/ansible-requirements.yml](container/ansible-requirements.yml) and
+`community.sap_infrastructure` from the fork branch (see [deploy_scenarios/sap_hana_ha/ansible_requirements.yml](deploy_scenarios/sap_hana_ha/ansible_requirements.yml)):
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
@@ -87,72 +135,63 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Then open http://localhost:5000 and follow the steps in the console. The home page now leads with provider connectivity and live inventory for AWS, GCP, Azure, and local KVM, then guides you through provisioning. If a provider is not connected, its dashboard card opens a separate provider-profile form with only the minimum connectivity fields for that provider, instead of sending you into the provisioning console. The UI validates Python, Ansible, SSH, and repository prerequisites before execution and displays a live log view while the automation runs.
+#### First steps
+1. Open the provider card of your platform, use *Configure provider* and fill in its tab, including the *Owner tag*.
+2. Run the wizard, or load a wizard input file and add the secrets, which are never stored in these files.
+3. Follow the job. When it has finished, the job page shows how to connect to the hosts and offers *Terminate*.
 
-If you do not want to re-enter values each time, the wizard can also import a JSON file keyed by wizard field names. The AWS SAP HANA HA input template is [sample-inputs/sap_hana_ha_aws_test_32gb.template.json](sample-inputs/sap_hana_ha_aws_test_32gb.template.json). It contains placeholders rather than account credentials or deployment-specific network values.
+#### SSH keys and SAP media
+- Enter paths as seen by the console: in the container `/mnt/ssh/<key>` for SSH keys. Paths under the host SSH directory
+  (`SAP_SSH_DIR_HOST`) are translated to `/mnt/ssh` automatically.
+- Media you already have: mount the directory to `/mnt/media` and enter `/mnt/media` as installation media directory.
+- Media download with the S-user: the files are downloaded to the state directory (`container-data/sap_media`) and reused
+  by later jobs, so keep the same state directory between container runs. The installation media directory field must
+  still point to an existing directory in the console, e.g. the (empty) `/mnt/media` mount.
 
-Create a private input file before filling in your own values:
+#### Security
+- The console is a single-user tool. Saved provider profiles (cloud credentials) and generated variables (SAP
+  passwords) are stored in plaintext in the state directory (`container-data`, `/var/lib/sap-wizard` in the
+  container). Keep it private; do not share it or bake it into images.
+- It listens on `127.0.0.1` by default. When publishing it on the network, set `SAP_WIZARD_AUTH_USER` and
+  `SAP_WIZARD_AUTH_PASSWORD`, or reach it through an SSH tunnel.
 
-```bash
-cp sample-inputs/sap_hana_ha_aws_test_32gb.template.json sample-inputs/sap_hana_ha_aws_test_32gb.local.json
-```
+#### Resource ownership and teardown
+- VMs are tagged `Owner=<your Owner tag>` (on Google Cloud as label `owner`, e.g. `user_name-at-example_com`). The
+  inventory lists and allows deleting only VMs with your Owner tag; without an Owner tag it is read-only.
+- Resources created with the VMs carry the Owner tag as well where the platform allows it: AWS EBS volumes, network
+  interfaces and placement groups; MS Azure OS and data disks, SBD shared disks, network interfaces, load balancers and
+  availability sets; Google Cloud data disks; Apache CloudStack root and data volumes. Not taggable by the automation:
+  Google Cloud boot disks, static IP addresses, forwarding rules, health checks, backend services and instance groups,
+  AWS route table entries, AWS IAM roles shared by all HA deployments of an account, CloudStack affinity groups and
+  LINSTOR SBD resources.
+- HA load balancers (`lb-<sid>-<primary host>-hana|anydb|nwas`) and placement groups / availability sets / placement
+  policies (`pg-<sid>-<primary host>-spread`) get unique names per deployment, so several deployments can share an
+  account, project or subscription. Set the playbook variables (e.g. `sap_vm_provision_ha_load_balancer_name_hana`) in
+  the YAML override to choose your own names.
+- *Terminate* deletes only resources of the job: its VMs (by host name, created by the automation), their disks and
+  network interfaces, and HA resources with the job's unique names. Shared HA resources (MS Azure load balancers,
+  availability sets, SBD disks) are deleted only with the job's Owner tag; load balancers with the role default names
+  (`lb-sap-ha-*`) are never deleted. If the VMs were deleted outside the console, leftover disks and network
+  interfaces named after the job's hosts are deleted only when they carry the job's Owner tag.
 
-Replace all `ENTER_*` placeholders in the local copy, adjust the example defaults to your deployment, and upload that copy to the wizard. Files named `*.local.json` are excluded from Git and Docker build contexts; keep them in an encrypted backup if needed. Do not put real values in the tracked template or force-add private input files. Use provider configuration for cloud credentials.
+#### Platform notes
+- **Apache CloudStack:** prepare the zone once as described in [tools/cloudstack/README.md](tools/cloudstack/README.md)
+  (template, KVM CPU model, offerings, fencing). Only credentials entered in the UI, or `CLOUDSTACK_*` environment
+  variables passed to the container, are used.
+- **AWS HA:** the scenarios create or update the IAM role `HA-Role-Pacemaker`, its policies and the instance profile
+  `HA-Instance-Profile-Pacemaker-Cluster`, which requires IAM permissions (not available e.g. with the
+  *PowerUserAccess* permission set). Without them, let an administrator create the role and instance profile once and
+  add `sap_vm_provision_aws_ha_iam_manage: false` to the YAML override; `iam:PassRole` on the role is still required.
 
-#### Portable containerized web UI
-To freeze the UI and its automation dependencies, this repository now includes a pinned container build. On a new machine you only need Docker (with Compose v2 and BuildKit) and this repository:
-
-```bash
-git clone -b feature/cloudstack-console https://github.com/ksanjeet/provisioning-console.git
-cd provisioning-console
-docker compose up --build
-```
-
-Then open http://localhost:5000. The build fetches the `community.sap_infrastructure` collection with the Apache CloudStack platform from the fork branch `feature/cloudstack_vm` on GitHub; no other checkout is needed.
-
-First steps in the UI:
-1. Open the provider card of your platform (AWS, Google Cloud, Microsoft Azure or Apache CloudStack) and use *Configure provider*. The connection settings of each platform are on their own tab. Set your e-mail or user ID as *Owner tag*.
-2. Run the wizard, or load a wizard input file (examples in [sample-inputs/](sample-inputs)) and add the secrets that are never stored in these files.
-3. Follow the job; when it has finished, the job page shows how to connect to the hosts and offers *Terminate* to delete the resources of the job.
-
-By default the console listens on `127.0.0.1` only. To use it from another machine, publish it on all interfaces and enable authentication, for example in a `.env` file next to `compose.yml`:
-
-```bash
-SAP_WIZARD_PUBLISH_ADDRESS=0.0.0.0
-SAP_WIZARD_AUTH_USER=admin
-SAP_WIZARD_AUTH_PASSWORD=<strong password>
-SAP_SSH_DIR=/path/to/.ssh
-```
-
-The console is a single-user tool: saved provider profiles (cloud credentials) and generated variables (SAP passwords) are stored in plaintext in the state directory `./container-data` (`/var/lib/sap-wizard` in the container). Keep this directory private and do not share it or bake it into images. Saved wizard input files (*Save inputs as JSON*) never contain passwords, secrets or keys.
-
-To keep the container portable across workstations, the compose file mounts host media and SSH directories through environment variables. Set them before starting the stack if your files do not live under `./media` and `./ssh`:
-
-```bash
-export SAP_MEDIA_DIR=/path/to/sap/media
-export SAP_SSH_DIR=$HOME/.ssh
-docker compose up --build
-```
-
-Containerization details:
-- [Dockerfile](Dockerfile) pins Python dependencies from [requirements-container.txt](requirements-container.txt).
-- [container/ansible-requirements.yml](container/ansible-requirements.yml) pins the Ansible collections used by the UI.
-- `container/apply_collection_patches.py` reapplies the AWS session-token fix for `community.sap_infrastructure`, the storage-size normalization fix for `community.sap_install`, and the HANA HSR runtime fixes. HSR status, enable, register, unregister, and disable commands first enter the instance directory so environment discovery does not inherit an inaccessible SSH-user home directory. They source the instance-level `hdbenv.sh` under Bash (without loading the user's `.profile`) and run from the initialized host directory. Environment initialization errors stop the command rather than being ignored. HSR command tasks are patched as parsed YAML and validated before writing; the local Flask UI also rechecks patch requirements after patching.
-- HA scenarios default to normal HANA logging. Before HSR backup and enablement, the collection patch removes a local HOST-level `log_mode=overwrite` override left by older wizard runs so SYSTEM-level normal logging can take effect. SQL failures stop the repair; other HOST settings are preserved.
-- After changing the patch helper, rebuild and recreate the service with `docker compose up -d --build --force-recreate sap-wizard`. Recreating an existing image alone does not refresh its build-time collection patches. To patch an existing container using its current application code, run `docker compose exec sap-wizard python /opt/sap-wizard/container/apply_collection_patches.py /opt/ansible/collections`; do not use a stale helper copied to `/tmp` during an earlier build.
-- [compose.yml](compose.yml) persists runtime state in [container-data/](container-data) and can be extended with mounts for SSH keys, and media.
-
-Important notes when running in the container:
-- Generated jobs, logs, and saved provider profiles are stored under `/var/lib/sap-wizard` inside the container and persisted through the [compose.yml](compose.yml) volume mount.
-- If your playbooks reference SSH keys or media files, mount them into the container and enter the container path in the UI (for example `/mnt/ssh/id_rsa`).
-- Owner tag: set your e-mail or user ID as *Owner tag* in each provider's connection settings. Provisioned VMs are tagged `Owner=<value>` (on Google Cloud as label `owner`, e.g. `user_name-at-example_com`), and the provider inventory lists and allows deleting only VMs with your Owner tag. Without an Owner tag the inventory is read-only.
-- High Availability load balancer resources (GCP, MS Azure, IBM Cloud) get unique names per deployment, `lb-<sid>-<primary host>-hana|anydb|nwas`, so several deployments can share a project or subscription. Set `sap_vm_provision_ha_load_balancer_name_hana` (or `_anydb`, `_nwas`) in the YAML override to choose your own.
-- Apache CloudStack: prepare the zone once as described in [tools/cloudstack/README.md](tools/cloudstack/README.md) (template, KVM CPU model, offerings, fencing). Save the API URL, key and secret in the CloudStack provider card. Only credentials entered in the UI (or `CLOUDSTACK_*` environment variables passed to the container) are used.
-- Resources created with the VMs are tagged with the Owner tag as well where the platform allows it: AWS EBS volumes, network interfaces and placement groups; MS Azure OS and data disks, SBD shared disks, network interfaces, load balancers and availability sets; Google Cloud data disks; Apache CloudStack root and data volumes. Not taggable by the automation: Google Cloud boot disks, static IP addresses, forwarding rules, health checks, backend services and instance groups (unique names per deployment instead), AWS route table entries, IAM roles shared by all HA deployments of an AWS account, CloudStack affinity groups and LINSTOR SBD resources.
-- *Terminate* deletes only resources of the job: its VMs (found by host name and created by the automation), their disks and network interfaces, and HA resources with the job's unique names. Shared HA resources (MS Azure load balancers, availability sets and SBD disks) are deleted only with the job's Owner tag. Load balancer resources with the role default names (`lb-sap-ha-*`), which other deployments may use, are never deleted. If the VMs were already deleted outside the console, leftover disks and network interfaces named after the job's hosts are deleted only when they carry the job's Owner tag.
-- Placement groups (AWS), availability sets (MS Azure) and placement policies (Google Cloud) also get unique names per deployment, `pg-<sid>-<primary host>-spread`.
-- AWS HA scenarios create or update the IAM role `HA-Role-Pacemaker`, its policies and the instance profile `HA-Instance-Profile-Pacemaker-Cluster`, which requires IAM permissions (e.g. not available with the *PowerUserAccess* permission set). Without them, let an administrator create the role and instance profile once and add `sap_vm_provision_aws_ha_iam_manage: false` to the YAML override; `iam:PassRole` on the role is still required.
-- The image build installs `community.sap_infrastructure` (with the Apache CloudStack platform) from the build context `sap_infrastructure`: by default the fork branch on GitHub, for development a local checkout with `SAP_INFRASTRUCTURE_DIR=../community.sap_infrastructure` (e.g. in `.env`). The source is bind-mounted during the build and not stored in image layers.
+#### Development notes
+- [Dockerfile](Dockerfile) pins the Python dependencies of [requirements-container.txt](requirements-container.txt);
+  [container/ansible-requirements.yml](container/ansible-requirements.yml) pins the Ansible collections.
+- [container/apply_collection_patches.py](container/apply_collection_patches.py) applies compatibility fixes to the
+  installed collections at build time (AWS session token, storage size normalization, SAP HANA System Replication
+  commands and log mode). The console checks at startup that the patches are present.
+- After changing the patch helper or the collection, rebuild and recreate the service:
+  `docker compose up -d --build --force-recreate sap-wizard`.
+- The collection source is bind-mounted during the build and not stored in image layers.
 
 ### Ansible with existing host(s)
 This method is used to install the SAP system on an existing host(s).  
