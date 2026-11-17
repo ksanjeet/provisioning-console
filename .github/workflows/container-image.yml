@@ -1,0 +1,63 @@
+# Builds the provisioning console container image and publishes it to GitHub Container Registry
+# (ghcr.io/<owner>/provisioning-console). The community.sap_infrastructure collection with the Apache CloudStack
+# platform is fetched from its fork branch (build context 'sap_infrastructure', see Dockerfile and compose.yml).
+name: Container image
+
+on:
+  push:
+    branches:
+      - feature/cloudstack-console
+  # Manual run, e.g. after changes to the community.sap_infrastructure branch
+  workflow_dispatch:
+
+env:
+  SAP_INFRASTRUCTURE_REPO: https://github.com/ksanjeet/community.sap_infrastructure.git
+  SAP_INFRASTRUCTURE_REF: feature/cloudstack_vm
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: container-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image name and collection revision
+        id: meta
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/provisioning-console" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "collection_sha=$(git ls-remote "$SAP_INFRASTRUCTURE_REPO" "refs/heads/$SAP_INFRASTRUCTURE_REF" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-contexts: |
+            sap_infrastructure=${{ env.SAP_INFRASTRUCTURE_REPO }}#${{ env.SAP_INFRASTRUCTURE_REF }}
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=SAP provisioning console (AWS, Azure, Google Cloud, Apache CloudStack)
+            io.github.ksanjeet.sap-infrastructure.revision=${{ steps.meta.outputs.collection_sha }}

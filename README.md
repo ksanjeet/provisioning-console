@@ -192,6 +192,9 @@ python app.py
 - After changing the patch helper or the collection, rebuild and recreate the service:
   `docker compose up -d --build --force-recreate sap-wizard`.
 - The collection source is bind-mounted during the build and not stored in image layers.
+- [.github/workflows/container-image.yml](.github/workflows/container-image.yml) builds the image on every push to
+  `feature/cloudstack-console` and publishes it as `ghcr.io/<owner>/provisioning-console:latest` and `:<commit>`.
+  After changes to the `community.sap_infrastructure` branch only, start it manually (*Actions → Container image → Run workflow*).
 
 ### Ansible with existing host(s)
 This method is used to install the SAP system on an existing host(s).  
