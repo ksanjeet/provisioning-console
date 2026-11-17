@@ -10,6 +10,9 @@ from container.apply_collection_patches import (
     HSR_EXECUTABLE_PATH,
     patch_hsr_commands,
     patch_hsr_log_mode,
+    patch_srhook_activation,
+    SRHOOK_ACTIVATE_NAME,
+    SRHOOK_UPDATE_REGISTER,
 )
 
 
@@ -177,3 +180,39 @@ class HsrCommandPatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SrHookActivationPatchTests(unittest.TestCase):
+    ORIGINAL = [
+        {"name": "SAP HA Pacemaker srHook - Get contents of global.ini", "ansible.builtin.command": "cat global.ini"},
+        {"name": "SAP HA Pacemaker srHook - Update srHook providers in global.ini",
+         "ansible.builtin.blockinfile": {"path": "global.ini", "block": "x"}, "loop": "{{ hooks }}"},
+        {"name": "SAP HA Pacemaker srHook - Add srHook sudo entries", "ansible.builtin.template": {"src": "a", "dest": "b"}},
+    ]
+
+    def _file(self, tasks):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
+        yaml.safe_dump(tasks, handle)
+        handle.close()
+        return Path(handle.name)
+
+    def test_registers_update_and_appends_activation_once(self):
+        path = self._file(self.ORIGINAL)
+        self.assertEqual(patch_srhook_activation(path), 1)
+        self.assertEqual(patch_srhook_activation(path), 0)
+        tasks = yaml.safe_load(path.read_text())
+        update = tasks[1]
+        self.assertEqual(update["register"], SRHOOK_UPDATE_REGISTER)
+        activation = tasks[-1]
+        self.assertEqual(activation["name"], SRHOOK_ACTIVATE_NAME)
+        self.assertEqual(activation["when"], [f"{SRHOOK_UPDATE_REGISTER} is changed"])
+        commands = " ".join(task["ansible.builtin.shell"] for task in activation["block"])
+        self.assertIn("hdbnsutil -reloadHADRProviders", commands)
+        self.assertIn("HDB stop && HDB start", commands)
+        restart = activation["block"][-1]
+        self.assertIn("'primary' not in __sap_ha_pacemaker_cluster_register_sr_mode.stdout", restart["when"])
+
+    def test_missing_update_task_is_an_error(self):
+        path = self._file([self.ORIGINAL[0]])
+        with self.assertRaises(RuntimeError):
+            patch_srhook_activation(path)

@@ -1,4 +1,5 @@
 import json
+import yaml
 from pathlib import Path
 import re
 import shutil
@@ -968,3 +969,57 @@ class LeftoverTeardownTests(unittest.TestCase):
             client.deleted.clear()
             cs._delete_leftover_volumes({})
             self.assertEqual(client.deleted, [])
+
+
+class CloudStackIpAddressCheckTests(unittest.TestCase):
+    NETWORK = {"id": "net1", "name": "shared1"}
+
+    def _check(self, hosts, vips, used_by=None):
+        cs = console.cloudstack_support
+        vms = [{"name": name, "nic": [{"networkid": "net1", "ipaddress": ip, "secondaryip": []}]}
+               for ip, name in (used_by or {}).items()]
+
+        def fake_list(client, command, **params):
+            if command == "listVlanIpRanges":
+                return [{"startip": "10.0.1.11", "endip": "10.0.1.20"}, {"startip": "10.0.1.21", "endip": "10.0.1.100"}]
+            if command == "listVirtualMachines":
+                return vms
+            return []
+
+        with patch.object(cs, "_list", side_effect=fake_list):
+            return cs.check_ip_addresses(object(), self.NETWORK, hosts, vips, console._build_preflight_check)
+
+    def test_addresses_inside_range_and_free(self):
+        result = self._check({"hanacl1": {"cloudstack_vm_ip_address": "10.0.1.21"},
+                              "hanacl2": {"cloudstack_vm_ip_address": "10.0.1.22"}}, ["10.0.1.23/24"])
+        self.assertTrue(result["ok"], result)
+
+    def test_address_outside_range(self):
+        result = self._check({"hanacl1": {"cloudstack_vm_ip_address": "10.0.1.150"}}, [])
+        self.assertFalse(result["ok"])
+        self.assertIn("outside the IP range", result["message"])
+        self.assertIn("10.0.1.21-10.0.1.100", result["message"])
+
+    def test_address_used_by_other_vm_but_rerun_of_same_vm_is_fine(self):
+        result = self._check({"hanacl1": {"cloudstack_vm_ip_address": "10.0.1.21"}}, ["10.0.1.16"],
+                             used_by={"10.0.1.21": "hanacl1", "10.0.1.16": "hanaha1"})
+        self.assertFalse(result["ok"])
+        self.assertIn("10.0.1.16 (Virtual IP) is already used by VM 'hanaha1'", result["message"])
+        self.assertNotIn("10.0.1.21 (hanacl1)", result["message"])
+
+    def test_no_requested_addresses(self):
+        self.assertIsNone(self._check({"h": {"cloudstack_vm_ip_address": "ENTER_STRING_VALUE_HERE"}}, []))
+
+
+class StartJobGeneratedFileTests(unittest.TestCase):
+    def test_each_job_gets_its_own_variables_file(self):
+        config = {"scenario": "sap_hana_ha", "inventory_file": "", "platform": "cloudstack_vm"}
+        with (
+            patch.object(console, "build_generated_document", side_effect=[{"a": 1}, {"a": 2}]),
+            patch.object(console.threading, "Thread"),
+        ):
+            first, second = console.start_job(config), console.start_job(config)
+        files = [Path(console.JOB_STATE[job]["generated_file"]) for job in (first, second)]
+        self.assertNotEqual(files[0], files[1])
+        self.assertEqual([yaml.safe_load(f.read_text()) for f in files], [{"a": 1}, {"a": 2}])
+        self.assertTrue(all(job in f.name for job, f in zip((first, second), files)))

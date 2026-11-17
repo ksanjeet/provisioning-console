@@ -87,6 +87,12 @@ HSR_LOG_MODE_TARGET = (
     "ansible_collections/community/sap_install/roles/sap_ha_install_hana_hsr/tasks/pre_tasks/set_log_mode.yml"
 )
 HSR_LOG_MODE_REPAIR_NAME = "SAP HSR - Repair legacy HOST log_mode override"
+SRHOOK_TARGET = (
+    "ansible_collections/community/sap_install/roles/sap_ha_pacemaker_cluster/tasks/post_tasks/post_srhook.yml"
+)
+SRHOOK_UPDATE_TASK_NAME = "SAP HA Pacemaker srHook - Update srHook providers in global.ini"
+SRHOOK_UPDATE_REGISTER = "__sap_ha_pacemaker_cluster_register_srhook_update"
+SRHOOK_ACTIVATE_NAME = "SAP HA Pacemaker srHook - Activate HA/DR providers in running SAP HANA"
 LAUNCHPAD_TIMEOUT_TARGET_FILES = [
     "ansible_collections/community/sap_launchpad/plugins/module_utils/sap_api_common.py",
 ]
@@ -231,6 +237,65 @@ def patch_hsr_log_mode(path: Path) -> int:
     return 1
 
 
+def patch_srhook_activation(path: Path) -> int:
+    """The role writes the HA/DR provider hooks to global.ini while SAP HANA is running, but neither reloads the
+    providers nor restarts SAP HANA, so the hooks stay inactive (no srHook attribute, no takeover protection).
+    Reload the providers on all nodes and restart SAP HANA on the secondary once, while the SAP HANA cluster resources
+    are still in maintenance, so the hook on the primary records the system replication state."""
+    tasks = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if any(task.get("name") == SRHOOK_ACTIVATE_NAME for task in tasks):
+        return 0
+    update = next((task for task in tasks if task.get("name") == SRHOOK_UPDATE_TASK_NAME), None)
+    if update is None:
+        raise RuntimeError(f"{path}: task '{SRHOOK_UPDATE_TASK_NAME}' not found")
+    update["register"] = SRHOOK_UPDATE_REGISTER
+    sidadm = "{{ sap_ha_pacemaker_cluster_hana_sid | lower }}adm"
+    instance = "{{ sap_ha_pacemaker_cluster_hana_instance_nr }}"
+    tasks.append({
+        "name": SRHOOK_ACTIVATE_NAME,
+        "when": [f"{SRHOOK_UPDATE_REGISTER} is changed"],
+        "block": [
+            {
+                "name": "SAP HA Pacemaker srHook - Check if SAP HANA is running",
+                "ansible.builtin.shell": f"su - {sidadm} -c 'sapcontrol -nr {instance} -function GetProcessList'",
+                "register": "__sap_ha_pacemaker_cluster_register_hana_processes",
+                "changed_when": False,
+                # sapcontrol GetProcessList: 3 = all processes running (GREEN)
+                "failed_when": False,
+            },
+            {
+                "name": "SAP HA Pacemaker srHook - Reload HA/DR providers",
+                "ansible.builtin.shell": f"su - {sidadm} -c 'hdbnsutil -reloadHADRProviders'",
+                "when": ["__sap_ha_pacemaker_cluster_register_hana_processes.rc == 3"],
+                "changed_when": True,
+            },
+            {
+                "name": "SAP HA Pacemaker srHook - Get system replication mode",
+                "ansible.builtin.shell": f"su - {sidadm} -c 'hdbnsutil -sr_state' | grep -E '^mode:'",
+                "register": "__sap_ha_pacemaker_cluster_register_sr_mode",
+                "when": ["__sap_ha_pacemaker_cluster_register_hana_processes.rc == 3"],
+                "changed_when": False,
+                "failed_when": False,
+            },
+            {
+                "name": "SAP HA Pacemaker srHook - Restart SAP HANA secondary to record the system replication state",
+                "ansible.builtin.shell": f"su - {sidadm} -c 'HDB stop && HDB start'",
+                "when": [
+                    "__sap_ha_pacemaker_cluster_register_hana_processes.rc == 3",
+                    "__sap_ha_pacemaker_cluster_register_sr_mode.stdout | d('') | length > 0",
+                    "'primary' not in __sap_ha_pacemaker_cluster_register_sr_mode.stdout",
+                    "'none' not in __sap_ha_pacemaker_cluster_register_sr_mode.stdout",
+                ],
+                "changed_when": True,
+            },
+        ],
+    })
+    patched = yaml.safe_dump(tasks, sort_keys=False, width=1000)
+    yaml.safe_load(patched)
+    path.write_text(patched, encoding="utf-8")
+    return 1
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: apply_collection_patches.py <collections-root>", file=sys.stderr)
@@ -244,6 +309,7 @@ def main() -> int:
     total_hsr_backup_expansion_replacements = 0
     total_hsr_backup_verify_replacements = 0
     total_launchpad_timeout_replacements = 0
+    total_srhook_activation_insertions = 0
     missing_files = []  # type: List[str]
 
     for relative_path in SESSION_TOKEN_TARGET_FILES:
@@ -307,6 +373,12 @@ def main() -> int:
             LAUNCHPAD_TIMEOUT_TARGET,
         )
 
+    srhook_target = collections_root / SRHOOK_TARGET
+    if srhook_target.exists():
+        total_srhook_activation_insertions += patch_srhook_activation(srhook_target)
+    else:
+        missing_files.append(SRHOOK_TARGET)
+
     if missing_files:
         print("missing collection files:", file=sys.stderr)
         for relative_path in missing_files:
@@ -321,7 +393,8 @@ def main() -> int:
         f"{total_hsr_log_mode_replacements} HSR log mode repair insertion(s) and "
         f"{total_hsr_backup_expansion_replacements} HSR backup expansion replacement(s) and "
         f"{total_hsr_backup_verify_replacements} HSR backup verification replacement(s) and "
-        f"{total_launchpad_timeout_replacements} Launchpad timeout replacement(s)."
+        f"{total_launchpad_timeout_replacements} Launchpad timeout replacement(s) and "
+        f"{total_srhook_activation_insertions} srHook activation insertion(s)."
     )
     return 0
 

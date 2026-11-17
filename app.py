@@ -29,6 +29,8 @@ from container.apply_collection_patches import (
     HSR_EXECUTABLE_PATH,
     HSR_LOG_MODE_REPAIR_NAME,
     HSR_LOG_MODE_TARGET,
+    SRHOOK_ACTIVATE_NAME,
+    SRHOOK_TARGET,
 )
 
 try:
@@ -77,6 +79,10 @@ COLLECTION_PATCH_REQUIREMENTS = [
     {
         "target": Path(HSR_LOG_MODE_TARGET),
         "needle": HSR_LOG_MODE_REPAIR_NAME,
+    },
+    {
+        "target": Path(SRHOOK_TARGET),
+        "needle": SRHOOK_ACTIVATE_NAME,
     },
     {
         "target": Path(
@@ -2159,6 +2165,7 @@ def run_aws_preflight_check(config):
 def run_cloudstack_preflight_check(config):
     # Use the generated variables (scenario file + YAML override + wizard HA host names), as passed to the playbook
     selected_hosts = {}
+    vips = []
     if config.get("scenario") and config.get("host_plan"):
         try:
             document = build_generated_document(config)
@@ -2166,7 +2173,11 @@ def run_cloudstack_preflight_check(config):
             document = {get_host_specification_variable_name("cloudstack_vm"): get_scenario_host_specifications(config["scenario"], "cloudstack_vm")}
         host_specs = document.get(get_host_specification_variable_name("cloudstack_vm")) or {}
         selected_hosts = host_specs.get(config["host_plan"], {}) if isinstance(host_specs, dict) else {}
-    return cloudstack_support.run_preflight_check({**config, "_cloudstack_selected_hosts": selected_hosts}, _build_preflight_check)
+        vips = [document.get(key) for key in (
+            "sap_vm_provision_ha_vip_hana_primary", "sap_vm_provision_ha_vip_anydb_primary",
+            "sap_vm_provision_ha_vip_nwas_abap_ascs", "sap_vm_provision_ha_vip_nwas_abap_ers") if document.get(key)]
+    return cloudstack_support.run_preflight_check(
+        {**config, "_cloudstack_selected_hosts": selected_hosts, "_cloudstack_vips": vips}, _build_preflight_check)
 
 
 def run_platform_preflight_check(config):
@@ -3084,7 +3095,10 @@ def start_job(config, preflight_results=None):
     scenario_path = SCENARIO_DIR / scenario_name
     playbook_path = scenario_path / "ansible_playbook.yml"
 
-    generated_file = GENERATED_DIR / f"{scenario_name}_webui_generated.yml"
+    # One variables file per job: job pages, connection details and Terminate of earlier jobs keep referring to
+    # their own hosts when later jobs run
+    job_id = uuid.uuid4().hex
+    generated_file = GENERATED_DIR / f"{scenario_name}_{job_id}.yml"
     output = build_generated_document(config)
 
     filtered = {}
@@ -3098,7 +3112,6 @@ def start_job(config, preflight_results=None):
     with open(generated_file, "w", encoding="utf-8") as handle:
         yaml.safe_dump(filtered, handle, sort_keys=False, default_flow_style=False)
 
-    job_id = uuid.uuid4().hex
     log_file = RUNS_DIR / f"{job_id}.log"
     status_file = RUNS_DIR / f"{job_id}.json"
 

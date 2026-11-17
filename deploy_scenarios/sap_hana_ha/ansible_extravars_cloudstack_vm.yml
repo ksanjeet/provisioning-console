@@ -78,7 +78,21 @@ sap_vm_provision_cloudstack_ha_sbd_devices:
 
 #### High Availability - SAPHanaSR ####
 # The SLES for SAP 'sap-hana' pattern installs classic SAPHanaSR, replace it with SAPHanaSR-angi before the cluster setup.
+# For classic SAPHanaSR set both variables to false.
 sap_ha_pacemaker_cluster_saphanasr_angi_force: true
+# sap_ha_pacemaker_cluster_saphanasr_angi_detection: false
+
+
+#### High Availability - Corosync ####
+# A token of 30 s (consensus 1.2 x token) tolerates short network interruptions of the KVM hosts (e.g. a link reset of
+# a NIC) without fencing; the SUSE default for on-premise is 5 s. Public cloud guides use 20-30 s.
+sap_ha_pacemaker_cluster_corosync_totem:
+  options:
+    token: 30000
+    consensus: 36000
+    join: 60
+    max_messages: 20
+    token_retransmits_before_loss_const: 10
 
 
 #### additional configuration when provisioning On-Premise hosts ####

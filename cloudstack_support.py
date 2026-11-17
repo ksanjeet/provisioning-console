@@ -6,6 +6,7 @@ as fallback, the CLOUDSTACK_* environment variables / cloudstack.ini file.
 """
 
 import configparser
+import ipaddress
 import json
 import os
 import re
@@ -286,6 +287,12 @@ def run_preflight_check(config, build_check):
         else f"Network '{network_name}' was not found.",
     ))
 
+    if networks:
+        ip_check = check_ip_addresses(client, networks[0], config.get("_cloudstack_selected_hosts") or {},
+                                      config.get("_cloudstack_vips") or [], build_check)
+        if ip_check:
+            checks.append(ip_check)
+
     template_name = config.get("cloudstack_template_name")
     templates = [tpl for tpl in _list(client, "listTemplates", templatefilter="executable", **({"zoneid": zone_id} if zone_id else {}))
                  if tpl.get("name") == template_name]
@@ -320,6 +327,55 @@ def run_preflight_check(config, build_check):
             f"Missing service offering(s): {', '.join(missing)}." if missing else f"Available: {', '.join(requested)}.",
         ))
     return checks
+
+
+def check_ip_addresses(client, network, selected_hosts, vips, build_check):
+    """Requested VM IP addresses and Virtual IPs must be inside an IP range of the guest network and not be used by
+    other VMs (the planned VM itself may already use its address, e.g. when a job is re-run)."""
+    requested = {}  # ip -> planned host name, or None for a Virtual IP
+    for name, host in selected_hosts.items():
+        if isinstance(host, dict) and host.get("cloudstack_vm_ip_address"):
+            requested[str(host["cloudstack_vm_ip_address"]).strip()] = name
+    for vip in vips:
+        requested.setdefault(str(vip).split("/")[0].strip(), None)
+    requested = {ip: name for ip, name in requested.items() if ip and not ip.startswith("ENTER_")}
+    if not requested:
+        return None
+
+    ranges = []
+    for item in _list(client, "listVlanIpRanges", networkid=network["id"], listall=True):
+        try:
+            ranges.append((ipaddress.ip_address(item["startip"]), ipaddress.ip_address(item["endip"])))
+        except (KeyError, ValueError):
+            continue
+    used = {}  # ip -> VM name
+    for vm in _list(client, "listVirtualMachines", networkid=network["id"], listall=True):
+        for nic in vm.get("nic") or []:
+            if nic.get("networkid") not in (None, network["id"]):
+                continue
+            for address in [nic.get("ipaddress")] + [item.get("ipaddress") for item in nic.get("secondaryip") or []]:
+                if address:
+                    used[address] = vm.get("name")
+
+    problems = []
+    for ip, planned in sorted(requested.items()):
+        label = f"{ip} ({planned})" if planned else f"{ip} (Virtual IP)"
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            problems.append(f"{label} is not a valid IP address")
+            continue
+        if ranges and not any(start <= address <= end for start, end in ranges):
+            problems.append(f"{label} is outside the IP range(s) of network '{network.get('name')}'")
+        owner = used.get(ip)
+        if owner and owner not in requested.values():
+            problems.append(f"{label} is already used by VM '{owner}'")
+    range_text = ", ".join(f"{start}-{end}" for start, end in ranges) or "no IP range found"
+    if problems:
+        return build_check("CloudStack IP addresses", False,
+                           "; ".join(problems) + f". IP range(s) of the network: {range_text}.")
+    return build_check("CloudStack IP addresses", True,
+                       f"{len(requested)} address(es) inside {range_text} and not used by other VMs.")
 
 
 # Job resources
