@@ -93,6 +93,35 @@ SRHOOK_TARGET = (
 SRHOOK_UPDATE_TASK_NAME = "SAP HA Pacemaker srHook - Update srHook providers in global.ini"
 SRHOOK_UPDATE_REGISTER = "__sap_ha_pacemaker_cluster_register_srhook_update"
 SRHOOK_ACTIVATE_NAME = "SAP HA Pacemaker srHook - Activate HA/DR providers in running SAP HANA"
+CLASSIC_PROMOTABLE_DIR = "ansible_collections/community/sap_install/roles/sap_ha_pacemaker_cluster/tasks/prepare_vars"
+CLASSIC_PROMOTABLE_MARKER = "# Pacemaker 2.1+: promotable clone instead of the deprecated master resource"
+# Pacemaker 2.1 deprecates <master> resources and the Master/Slave role names; crm_verify reports them as warnings with
+# a non-zero exit code and the ha_cluster role aborts with "Cluster configuration was invalid" (classic SAPHanaSR on SUSE)
+CLASSIC_PROMOTABLE_REPLACEMENTS = {
+    "prepare_hana_scaleup.yml": [
+        (
+            """            - name: maintenance
+              value: "true"
+      # ms attribute is used to create ms resource instead of clone.
+      ms: true""",
+            '            - name: maintenance\n'
+            '              value: "true"\n'
+            '            ' + CLASSIC_PROMOTABLE_MARKER + '\n'
+            '            - name: promotable\n'
+            '              value: "true"',
+        ),
+        ("""            - name: role
+              value: Slave""", """            - name: role
+              value: Unpromoted"""),
+        ("""            - name: role
+              value: Master""", """            - name: role
+              value: Promoted"""),
+    ],
+    "prepare_vip_constraints_hana.yml": [
+        ("role: \"{{ 'master' if ansible_facts['os_family']", "role: \"{{ 'promoted' if ansible_facts['os_family']"),
+        ("role: \"{{ 'slave' if ansible_facts['os_family']", "role: \"{{ 'unpromoted' if ansible_facts['os_family']"),
+    ],
+}
 LAUNCHPAD_TIMEOUT_TARGET_FILES = [
     "ansible_collections/community/sap_launchpad/plugins/module_utils/sap_api_common.py",
 ]
@@ -296,6 +325,26 @@ def patch_srhook_activation(path: Path) -> int:
     return 1
 
 
+def patch_classic_promotable(directory: Path) -> int:
+    """Classic SAPHanaSR resources as promotable clone with Promoted/Unpromoted roles (Pacemaker 2.1+)."""
+    replacements = 0
+    for name, pairs in CLASSIC_PROMOTABLE_REPLACEMENTS.items():
+        path = directory / name
+        text = path.read_text(encoding="utf-8")
+        original = text
+        for source, target in pairs:
+            if target in text:
+                continue
+            if source not in text:
+                raise RuntimeError(f"{path}: expected text not found: {source.splitlines()[0].strip()}")
+            text = text.replace(source, target)
+            replacements += 1
+        if text != original:
+            yaml.safe_load(text)
+            path.write_text(text, encoding="utf-8")
+    return replacements
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: apply_collection_patches.py <collections-root>", file=sys.stderr)
@@ -310,6 +359,7 @@ def main() -> int:
     total_hsr_backup_verify_replacements = 0
     total_launchpad_timeout_replacements = 0
     total_srhook_activation_insertions = 0
+    total_classic_promotable_replacements = 0
     missing_files = []  # type: List[str]
 
     for relative_path in SESSION_TOKEN_TARGET_FILES:
@@ -379,6 +429,12 @@ def main() -> int:
     else:
         missing_files.append(SRHOOK_TARGET)
 
+    classic_dir = collections_root / CLASSIC_PROMOTABLE_DIR
+    if all((classic_dir / name).exists() for name in CLASSIC_PROMOTABLE_REPLACEMENTS):
+        total_classic_promotable_replacements += patch_classic_promotable(classic_dir)
+    else:
+        missing_files.extend(f"{CLASSIC_PROMOTABLE_DIR}/{name}" for name in CLASSIC_PROMOTABLE_REPLACEMENTS)
+
     if missing_files:
         print("missing collection files:", file=sys.stderr)
         for relative_path in missing_files:
@@ -394,7 +450,8 @@ def main() -> int:
         f"{total_hsr_backup_expansion_replacements} HSR backup expansion replacement(s) and "
         f"{total_hsr_backup_verify_replacements} HSR backup verification replacement(s) and "
         f"{total_launchpad_timeout_replacements} Launchpad timeout replacement(s) and "
-        f"{total_srhook_activation_insertions} srHook activation insertion(s)."
+        f"{total_srhook_activation_insertions} srHook activation insertion(s) and "
+        f"{total_classic_promotable_replacements} classic SAPHanaSR promotable replacement(s)."
     )
     return 0
 

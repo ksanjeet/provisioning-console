@@ -29,6 +29,8 @@ from container.apply_collection_patches import (
     HSR_EXECUTABLE_PATH,
     HSR_LOG_MODE_REPAIR_NAME,
     HSR_LOG_MODE_TARGET,
+    CLASSIC_PROMOTABLE_DIR,
+    CLASSIC_PROMOTABLE_MARKER,
     SRHOOK_ACTIVATE_NAME,
     SRHOOK_TARGET,
 )
@@ -83,6 +85,10 @@ COLLECTION_PATCH_REQUIREMENTS = [
     {
         "target": Path(SRHOOK_TARGET),
         "needle": SRHOOK_ACTIVATE_NAME,
+    },
+    {
+        "target": Path(CLASSIC_PROMOTABLE_DIR) / "prepare_hana_scaleup.yml",
+        "needle": CLASSIC_PROMOTABLE_MARKER,
     },
     {
         "target": Path(

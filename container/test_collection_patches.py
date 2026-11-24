@@ -11,6 +11,8 @@ from container.apply_collection_patches import (
     patch_hsr_commands,
     patch_hsr_log_mode,
     patch_srhook_activation,
+    patch_classic_promotable,
+    CLASSIC_PROMOTABLE_MARKER,
     SRHOOK_ACTIVATE_NAME,
     SRHOOK_UPDATE_REGISTER,
 )
@@ -216,3 +218,56 @@ class SrHookActivationPatchTests(unittest.TestCase):
         path = self._file([self.ORIGINAL[0]])
         with self.assertRaises(RuntimeError):
             patch_srhook_activation(path)
+
+
+class ClassicPromotablePatchTests(unittest.TestCase):
+    SCALEUP = """- name: monitor ops
+  set_fact:
+    ops:
+            - name: role
+              value: Slave
+            - name: role
+              value: Master
+- name: clone
+  set_fact:
+    clone:
+      meta_attrs:
+        - attrs:
+            - name: maintenance
+              value: "true"
+      # ms attribute is used to create ms resource instead of clone.
+      ms: true
+"""
+    VIP = """- name: vip
+  set_fact:
+    a:
+        role: "{{ 'master' if ansible_facts['os_family'] == 'Suse' and not angi else 'promoted' }}"
+    b:
+        role: "{{ 'slave' if ansible_facts['os_family'] == 'Suse' and not angi else 'unpromoted' }}"
+"""
+
+    def _dir(self, scaleup=SCALEUP):
+        directory = Path(tempfile.mkdtemp())
+        (directory / "prepare_hana_scaleup.yml").write_text(scaleup)
+        (directory / "prepare_vip_constraints_hana.yml").write_text(self.VIP)
+        return directory
+
+    def test_promotable_clone_and_role_names(self):
+        directory = self._dir()
+        self.assertEqual(patch_classic_promotable(directory), 5)
+        self.assertEqual(patch_classic_promotable(directory), 0)
+        scaleup = (directory / "prepare_hana_scaleup.yml").read_text()
+        self.assertNotIn("ms: true", scaleup)
+        self.assertIn(CLASSIC_PROMOTABLE_MARKER, scaleup)
+        clone = yaml.safe_load(scaleup)[1]["set_fact"]["clone"]["meta_attrs"][0]["attrs"]
+        self.assertIn({"name": "promotable", "value": "true"}, clone)
+        self.assertIn("value: Promoted", scaleup)
+        self.assertIn("value: Unpromoted", scaleup)
+        vip = (directory / "prepare_vip_constraints_hana.yml").read_text()
+        self.assertNotIn("'master'", vip)
+        self.assertNotIn("'slave'", vip)
+
+    def test_unexpected_content_is_an_error(self):
+        directory = self._dir(scaleup="- name: other\n  debug: {msg: x}\n")
+        with self.assertRaises(RuntimeError):
+            patch_classic_promotable(directory)
